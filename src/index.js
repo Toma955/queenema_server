@@ -36,18 +36,26 @@ const allowedOrigins = [
     .filter(Boolean),
 ];
 
+function isAllowedOrigin(origin) {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  // Vercel preview / production aliases
+  if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return true;
+  return false;
+}
+
 const app = express();
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: { origin: allowedOrigins, methods: ["GET", "POST"] },
+  cors: { origin: isAllowedOrigin, methods: ["GET", "POST"] },
   maxHttpBufferSize: 4e6,
   pingInterval: 25000,
   pingTimeout: 20000,
 });
 
 app.set("trust proxy", 1);
-app.use(cors({ origin: allowedOrigins }));
+app.use(cors({ origin: isAllowedOrigin }));
 app.use(express.json({ limit: "4mb" }));
 
 app.get("/api/health", (_req, res) => {

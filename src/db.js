@@ -291,28 +291,40 @@ export function getStateForEma() {
 }
 
 export function getPublicAvailability() {
-  return { acceptNewConversations: store.settings.acceptNewConversations };
+  const hasActive = store.conversations.some((c) => c.status === "active");
+  const hasPending = store.requests.some((r) => r.status === "pending");
+  const occupied = hasActive || hasPending;
+  const open = Boolean(store.settings.acceptNewConversations) && !occupied;
+  return {
+    acceptNewConversations: open,
+    occupied,
+    hasActive,
+    hasPending,
+  };
 }
 
+/** Otvori gost link — fiksni URL, bez UUID-a. */
 export function createInvite() {
-  const invite = {
-    token: randomUUID(),
-    status: "open",
-    created_at: new Date().toISOString(),
-  };
-  store.invites.push(invite);
   store.settings.acceptNewConversations = true;
   saveStore(store);
-  return { ok: true, invite: { token: invite.token, status: invite.status } };
+  const url =
+    (process.env.GUEST_URL || "https://queenema.art/guest").replace(/\/$/, "");
+  return { ok: true, url };
 }
 
 export function getInvite(token) {
-  const invite = store.invites.find((i) => i.token === token) || null;
-  if (!invite) return { ok: false, error: "Link nije valjan." };
-  if (invite.status !== "open") {
-    return { ok: false, error: "Link je već iskorišten ili zatvoren." };
+  // Stari token linkovi više nisu potrebni — guest ide na /guest
+  if (!token) return { ok: false, error: "Link nije valjan." };
+  const avail = getPublicAvailability();
+  if (!avail.acceptNewConversations) {
+    return {
+      ok: false,
+      error: avail.occupied
+        ? "Mjesto je zauzeto — netko već čeka ili razgovara s Emom."
+        : "Prijava trenutno nije otvorena.",
+    };
   }
-  return { ok: true, invite: { token: invite.token, status: invite.status } };
+  return { ok: true, invite: { token: "open", status: "open" } };
 }
 
 function saveAvatar(avatar, mimeHint = "image/jpeg") {
@@ -345,15 +357,15 @@ function saveAvatar(avatar, mimeHint = "image/jpeg") {
 }
 
 export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken, inviteToken }) {
-  const inviteKey = String(inviteToken || "").trim();
-  let invite = null;
-  if (inviteKey) {
-    invite = store.invites.find((i) => i.token === inviteKey) || null;
-    if (!invite || invite.status !== "open") {
-      return { ok: false, error: "Link nije valjan ili je već iskorišten." };
-    }
-  } else if (!store.settings.acceptNewConversations) {
-    return { ok: false, error: "Ema trenutno ne prima nove razgovore." };
+  const avail = getPublicAvailability();
+  if (!avail.acceptNewConversations) {
+    return {
+      ok: false,
+      error: avail.occupied
+        ? "Mjesto je zauzeto — netko već čeka ili razgovara s Emom."
+        : "Ema trenutno ne prima nove razgovore.",
+      code: avail.occupied ? "occupied" : "closed",
+    };
   }
   if (!meta?.cookiesAccepted) {
     return { ok: false, error: "Cookies privola je obavezna." };
@@ -413,19 +425,25 @@ export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken,
     }
   }
 
-  const guestName = String(name || "").trim().slice(0, 32);
-  if (!guestName) return { ok: false, error: "Ime je obavezno." };
+  const guestName = String(name || "").trim().slice(0, 48);
+  if (!guestName) return { ok: false, error: "Ime i prezime su obavezni." };
   const guestBio = String(bio || "").trim().slice(0, 500);
   if (!guestBio) return { ok: false, error: "Opis je obavezan." };
-  const guestAvatar = saveAvatar(avatar, avatarMime || "image/jpeg");
-  if (!guestAvatar) return { ok: false, error: "Slika je obavezna (jpg/png)." };
+
+  let guestAvatar = null;
+  if (avatar) {
+    guestAvatar = saveAvatar(avatar, avatarMime || "image/jpeg");
+    if (!guestAvatar) {
+      return { ok: false, error: "Slika nije valjana (jpg/png)." };
+    }
+  }
 
   const request = {
     id: nextId(),
     guestName,
     guestBio,
     guestAvatar,
-    inviteToken: inviteKey || null,
+    inviteToken: String(inviteToken || "").trim() || null,
     meta: {
       device: meta?.device === "mobile" ? "mobile" : "desktop",
       ip,
@@ -438,9 +456,6 @@ export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken,
     created_at: new Date().toISOString(),
   };
   store.requests.push(request);
-  if (invite) {
-    invite.status = "used";
-  }
   saveStore(store);
   return {
     ok: true,

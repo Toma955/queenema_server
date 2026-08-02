@@ -252,6 +252,8 @@ app.get("/api/guest/:token", (req, res) => {
 app.get("/api/media/:file", (req, res) => {
   const file = resolveMediaFile(req.params.file);
   if (!file) return res.status(404).end();
+  res.setHeader("Cache-Control", "public, max-age=86400");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.sendFile(file);
 });
 
@@ -513,11 +515,21 @@ io.on("connection", (socket) => {
     const id = conversationId || socket.data.conversationId;
     if (!id) return;
     const from = socket.data.role === "guest" ? "guest" : "ema";
-    socket.to(`conv:${id}`).emit("peer_typing", {
-      conversationId: id,
+    const payload = {
+      conversationId: Number(id) || id,
       from,
       typing: Boolean(typing),
-    });
+    };
+    // soba + broadcast staffovima (ako nisu u sobi)
+    socket.to(`conv:${id}`).emit("peer_typing", payload);
+    if (from === "guest") {
+      for (const sid of emaSockets) {
+        if (sid !== socket.id) io.to(sid).emit("peer_typing", payload);
+      }
+      for (const sid of adminSockets) {
+        if (sid !== socket.id) io.to(sid).emit("peer_typing", payload);
+      }
+    }
   });
 
   socket.on("respond_invite", ({ conversationId, messageId, answer } = {}) => {

@@ -962,7 +962,7 @@ export function reactToMessage(conversationId, from, messageId, kind) {
   return { ok: true, message: mapMessage(message) };
 }
 
-/** Poziv / videopoziv — samo ako je otključano (Ema i gost). */
+/** Poziv / videopoziv — gost treba unlock; Ema/admin uvijek smije. */
 export function createCallMessage(conversationId, from, kind) {
   const c = getConversation(conversationId);
   if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
@@ -970,8 +970,7 @@ export function createCallMessage(conversationId, from, kind) {
   const spec = CALL_KIND[kind];
   if (!spec) return { ok: false, error: "Nepoznat tip poziva." };
 
-  const feats = featuresForPatience(c.patience);
-  if (!feats[spec.feature]) {
+  if (from === "guest" && !featuresForPatience(c.patience)[spec.feature]) {
     return {
       ok: false,
       error: `${spec.label[0].toUpperCase()}${spec.label.slice(1)} još nije otključan.`,
@@ -1033,10 +1032,14 @@ export function respondToInvite(conversationId, from, messageId, answer) {
       return { ok: false, error: "Odgovor mora biti prihvati ili odbij." };
     }
     message.status = normalized === "accept" ? "accepted" : "declined";
-  } else if (message.type === "coffee") {
+  } else if (
+    message.type === "coffee" ||
+    (message.type === "reaction" && message.reaction === "coffee")
+  ) {
     if (normalized !== "yes" && normalized !== "no") {
       return { ok: false, error: "Odgovor mora biti da ili ne." };
     }
+    message.type = "coffee";
     message.status = normalized === "yes" ? "yes" : "no";
   } else {
     return { ok: false, error: "Na ovu poruku se ne odgovara." };

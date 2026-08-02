@@ -14,7 +14,7 @@ services:
       - key: ALLOWED_ORIGINS
         value: https://queenema.art,https://www.queenema.art,https://guest.queenema.art
       - key: GUEST_URL
-        value: https://queenema.art/guest
+        value: https://queenema.art
     disk:
       name: queenema-data
       mountPath: /var/data

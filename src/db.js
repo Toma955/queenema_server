@@ -308,7 +308,7 @@ export function createInvite() {
   store.settings.acceptNewConversations = true;
   saveStore(store);
   const url =
-    (process.env.GUEST_URL || "https://queenema.art/guest").replace(/\/$/, "");
+    (process.env.GUEST_URL || "https://queenema.art").replace(/\/$/, "");
   return { ok: true, url };
 }
 

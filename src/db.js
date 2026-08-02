@@ -183,6 +183,11 @@ const REACTION_KIND = {
   smile: { feature: "smile", text: "😊", label: "smajlić" },
   like: { feature: "like", text: "👍", label: "lajk" },
   heart: { feature: "heart", text: "❤️", label: "srce" },
+  coffee: {
+    feature: "coffee",
+    text: "☕ Idemo na kavu / dejt?",
+    label: "kava",
+  },
 };
 
 const CALL_KIND = {
@@ -700,7 +705,16 @@ export function setPatience(conversationId, patience) {
   const notices = [];
 
   if (prev !== next) {
-    notices.push(pushSystemMessage(c.id, `Zainteresiranost: ${next}`));
+    const delta = next - prev;
+    const abs = Math.abs(delta);
+    notices.push(
+      pushSystemMessage(
+        c.id,
+        delta > 0
+          ? `Dobio/la si +${abs} · zainteresiranost ${next}`
+          : `Izgubio/la si −${abs} · zainteresiranost ${next}`
+      )
+    );
   }
 
   const toggles = [
@@ -857,6 +871,7 @@ export function createReactionMessage(conversationId, from, kind) {
     created_at: new Date().toISOString(),
   };
   store.messages.push(message);
+  if (kind === "coffee") c.coffeeInvited = true;
   saveStore(store);
 
   return {

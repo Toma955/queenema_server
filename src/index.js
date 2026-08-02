@@ -508,6 +508,18 @@ io.on("connection", (socket) => {
     emitConversation(id, "new_message", result.message);
   });
 
+  socket.on("typing", ({ conversationId, typing } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") return;
+    const id = conversationId || socket.data.conversationId;
+    if (!id) return;
+    const from = socket.data.role === "guest" ? "guest" : "ema";
+    socket.to(`conv:${id}`).emit("peer_typing", {
+      conversationId: id,
+      from,
+      typing: Boolean(typing),
+    });
+  });
+
   socket.on("respond_invite", ({ conversationId, messageId, answer } = {}) => {
     if (!isStaff(socket) && socket.data.role !== "guest") {
       socket.emit("error_message", { error: "Nemaš pristup." });

@@ -92,6 +92,51 @@ app.use(express.json({ limit: "6mb" }));
 
 const emaSockets = new Set();
 const adminSockets = new Set();
+/** conversationId(number) -> Map(socketId -> role) */
+const convPeers = new Map();
+
+function convIdOf(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function trackConvPeer(socket, conversationId) {
+  const id = convIdOf(conversationId);
+  if (id == null) return null;
+  socket.join(`conv:${id}`);
+  socket.data.conversationId = id;
+  if (!convPeers.has(id)) convPeers.set(id, new Map());
+  convPeers.get(id).set(socket.id, socket.data.role || "unknown");
+  return id;
+}
+
+function untrackSocket(socket) {
+  for (const [id, peers] of convPeers) {
+    if (!peers.has(socket.id)) continue;
+    peers.delete(socket.id);
+    if (peers.size === 0) convPeers.delete(id);
+  }
+}
+
+function emitToConvPeers(conversationId, event, payload, exceptId) {
+  const id = convIdOf(conversationId);
+  if (id == null) return 0;
+  const peers = convPeers.get(id);
+  let sent = 0;
+  if (peers && peers.size) {
+    for (const sid of peers.keys()) {
+      if (sid === exceptId) continue;
+      io.to(sid).emit(event, payload);
+      sent += 1;
+    }
+  }
+  // fallback na Socket.IO room ako mapa prazna
+  if (sent === 0) {
+    if (exceptId) io.to(`conv:${id}`).except(exceptId).emit(event, payload);
+    else io.to(`conv:${id}`).emit(event, payload);
+  }
+  return sent;
+}
 
 function broadcastEma(event, payload) {
   for (const id of emaSockets) io.to(id).emit(event, payload);
@@ -111,26 +156,71 @@ function isStaff(socket) {
 }
 
 function emitConversation(conversationId, event, payload) {
-  io.to(`conv:${conversationId}`).emit(event, payload);
+  const id = convIdOf(conversationId) ?? conversationId;
+  io.to(`conv:${id}`).emit(event, payload);
 }
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, name: "queenema", ema: getEmaProfile().name, patience: PATIENCE });
 });
 
-/** ICE/TURN config za WebRTC pozive — dinamički Open Relay static-auth + free fallbacki */
-app.get("/api/ice", (_req, res) => {
+/** ICE/TURN config za WebRTC pozive */
+app.get("/api/ice", async (_req, res) => {
   const iceServers = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun.relay.metered.ca:80" },
-    { urls: "stun:freestun.net:3478" },
+    { urls: "stun:freeturn.net:3478" },
+    { urls: "stun:freeturn.net:5349" },
   ];
 
-  // Open Relay static-auth (javni secret iz dokumentacije)
-  const secret =
-    process.env.TURN_STATIC_SECRET || "openrelayprojectsecret";
-  const ttl = 12 * 3600;
+  // Metered / Open Relay REST (preporučeno — free account API key)
+  const meteredKey = process.env.METERED_API_KEY || process.env.TURN_API_KEY;
+  const meteredDomain =
+    process.env.METERED_DOMAIN || process.env.TURN_METERED_DOMAIN;
+  if (meteredKey && meteredDomain) {
+    try {
+      const url = `https://${meteredDomain}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(meteredKey)}`;
+      const r = await fetch(url, { signal: AbortSignal.timeout(4000) });
+      if (r.ok) {
+        const list = await r.json();
+        if (Array.isArray(list) && list.length) {
+          res.setHeader("Cache-Control", "no-store");
+          return res.json({ iceServers: [...iceServers, ...list], source: "metered" });
+        }
+      }
+    } catch {
+      /* fallback below */
+    }
+  }
+
+  let source = "fallback";
+  let ttl = 12 * 3600;
+
+  // elixir-webrtc public Rel (radi — short-lived REST credentials)
+  try {
+    const r = await fetch(
+      "https://turn.elixir-webrtc.org/?service=turn&username=queenema",
+      { method: "POST", signal: AbortSignal.timeout(4000) }
+    );
+    if (r.ok) {
+      const cred = await r.json();
+      if (cred?.username && cred?.password && Array.isArray(cred.uris) && cred.uris.length) {
+        iceServers.push({
+          urls: cred.uris,
+          username: cred.username,
+          credential: cred.password,
+        });
+        ttl = Number(cred.ttl) || ttl;
+        source = "elixir-rel";
+      }
+    }
+  } catch {
+    /* continue */
+  }
+
+  // Open Relay static-auth (često mrtav bez Metered API key — ostaje kao backup)
+  const secret = process.env.TURN_STATIC_SECRET || "openrelayprojectsecret";
   const unix = Math.floor(Date.now() / 1000) + ttl;
   const username = `${unix}:queenema`;
   const credential = crypto
@@ -149,18 +239,17 @@ app.get("/api/ice", (_req, res) => {
     credential,
   });
 
-  // freestun public free TURN
+  // freeturn.net (javni free:free) — TCP/TLS backup
   iceServers.push({
     urls: [
-      "turn:freestun.net:3478",
-      "turn:freestun.net:3478?transport=tcp",
-      "turns:freestun.net:5350",
+      "turn:freeturn.net:3478",
+      "turn:freeturn.net:3478?transport=tcp",
+      "turns:freeturn.net:5349",
     ],
     username: "free",
     credential: "free",
   });
 
-  // Opcionalno: vlastiti TURN iz env
   const turnUrls = String(process.env.TURN_URLS || "")
     .split(",")
     .map((s) => s.trim())
@@ -171,10 +260,11 @@ app.get("/api/ice", (_req, res) => {
       username: process.env.TURN_USERNAME,
       credential: process.env.TURN_CREDENTIAL,
     });
+    source = "env-turn";
   }
 
   res.setHeader("Cache-Control", "no-store");
-  res.json({ iceServers, ttl });
+  res.json({ iceServers, ttl, source });
 });
 
 app.get("/api/availability", (_req, res) => {
@@ -316,8 +406,7 @@ io.on("connection", (socket) => {
     const payload = guestPayload(authToken);
     socket.emit("guest_state", payload);
     if (payload.status === "active" && payload.conversation) {
-      socket.data.conversationId = payload.conversation.id;
-      socket.join(`conv:${payload.conversation.id}`);
+      trackConvPeer(socket, payload.conversation.id);
     }
   }
 
@@ -344,8 +433,7 @@ io.on("connection", (socket) => {
     const payload = guestPayload(guestToken);
     socket.emit("guest_state", payload);
     if (payload.status === "active" && payload.conversation) {
-      socket.data.conversationId = payload.conversation.id;
-      socket.join(`conv:${payload.conversation.id}`);
+      trackConvPeer(socket, payload.conversation.id);
     }
   });
 
@@ -399,8 +487,7 @@ io.on("connection", (socket) => {
         socket.emit("error_message", { error: "Nemaš pristup." });
         return;
       }
-      socket.data.conversationId = c.id;
-      socket.join(`conv:${c.id}`);
+      trackConvPeer(socket, c.id);
       return;
     }
 
@@ -418,8 +505,7 @@ io.on("connection", (socket) => {
       socket.data.role = "ema";
       emaSockets.add(socket.id);
     }
-    socket.data.conversationId = c.id;
-    socket.join(`conv:${c.id}`);
+    trackConvPeer(socket, c.id);
 
     socket.emit("conversation_state", {
       conversation: publicConversation(c),
@@ -434,8 +520,7 @@ io.on("connection", (socket) => {
       socket.emit("error_message", { error: "Razgovor nije pronađen." });
       return;
     }
-    socket.join(`conv:${c.id}`);
-    socket.data.conversationId = c.id;
+    trackConvPeer(socket, c.id);
     socket.emit("conversation_state", {
       conversation: publicConversation(c),
       messages: getMessages(c.id),
@@ -633,14 +718,21 @@ io.on("connection", (socket) => {
 
   socket.on("webrtc_signal", ({ conversationId, ...payload } = {}) => {
     if (!isStaff(socket) && socket.data.role !== "guest") return;
-    const id = conversationId || socket.data.conversationId;
-    if (!id) return;
+    const id = convIdOf(conversationId || socket.data.conversationId);
+    if (id == null) return;
+    // osiguraj da je pošiljatelj u mapi peerova
+    trackConvPeer(socket, id);
     const from = socket.data.role === "guest" ? "guest" : "ema";
-    socket.to(`conv:${id}`).emit("webrtc_signal", {
+    const msg = {
       conversationId: id,
       from,
       ...payload,
-    });
+    };
+    const sent = emitToConvPeers(id, "webrtc_signal", msg, socket.id);
+    // ako mapa nije imala peerove, room fallback je već u emitToConvPeers
+    if (sent === 0) {
+      socket.to(`conv:${id}`).emit("webrtc_signal", msg);
+    }
   });
 
   socket.on("set_ema_avatar", ({ image, mime, clear } = {}) => {
@@ -712,6 +804,7 @@ io.on("connection", (socket) => {
   socket.on("disconnect", () => {
     emaSockets.delete(socket.id);
     adminSockets.delete(socket.id);
+    untrackSocket(socket);
     io.emit("availability", {
       ...getPublicAvailability(),
       emaOnline: emaSockets.size > 0,

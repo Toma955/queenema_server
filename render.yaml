@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: queenema-api
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+      - key: ALLOWED_ORIGINS
+        value: https://queenema.art,https://www.queenema.art,https://admin.queenema.art
+    disk:
+      name: queenema-data
+      mountPath: /var/data
+      sizeGB: 1

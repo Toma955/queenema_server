@@ -982,7 +982,10 @@ export function createVoiceMessage(conversationId, from, base64Audio, mime = "au
     return { ok: false, error: "Glasovne još nisu otključane." };
   }
 
-  const clean = String(base64Audio || "").replace(/^data:audio\/\w+;base64,/, "");
+  const raw = String(base64Audio || "");
+  const marker = "base64,";
+  const idx = raw.indexOf(marker);
+  const clean = idx >= 0 ? raw.slice(idx + marker.length) : raw.replace(/\s/g, "");
   let buffer;
   try {
     buffer = Buffer.from(clean, "base64");
@@ -990,10 +993,18 @@ export function createVoiceMessage(conversationId, from, base64Audio, mime = "au
     return { ok: false, error: "Audio nije valjan." };
   }
   if (buffer.length < 100 || buffer.length > 3_000_000) {
-    return { ok: false, error: "Audio nije prihvatljiv." };
+    return {
+      ok: false,
+      error: `Audio nije prihvatljiv (${buffer.length} B). Probaj duže držati mic.`,
+    };
   }
 
-  const ext = mime.includes("mp4") ? "m4a" : mime.includes("ogg") ? "ogg" : "webm";
+  const mimeStr = String(mime || "audio/webm");
+  const ext = mimeStr.includes("mp4")
+    ? "m4a"
+    : mimeStr.includes("ogg")
+      ? "ogg"
+      : "webm";
   const fullPath = path.join(mediaDir, `${randomUUID()}.${ext}`);
   fs.writeFileSync(fullPath, buffer);
 

@@ -459,6 +459,10 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_message", ({ conversationId, text } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") {
+      socket.emit("error_message", { error: "Nemaš pristup." });
+      return;
+    }
     const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = createTextMessage(id, from, text);
@@ -472,21 +476,11 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("send_reaction", ({ conversationId, kind } = {}) => {
-    const from = socket.data.role === "guest" ? "guest" : "ema";
-    const id = conversationId || socket.data.conversationId;
-    const result = createReactionMessage(id, from, kind);
-    if (!result.ok) {
-      socket.emit("error_message", { error: result.error });
+  socket.on("react_message", ({ conversationId, messageId, kind } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") {
+      socket.emit("error_message", { error: "Nemaš pristup." });
       return;
     }
-    emitConversation(id, "new_message", result.message);
-    emitConversation(id, "patience", {
-      conversation: result.conversation,
-    });
-  });
-
-  socket.on("react_message", ({ conversationId, messageId, kind } = {}) => {
     const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = reactToMessage(id, from, messageId, kind);
@@ -498,11 +492,11 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_call", ({ conversationId, kind } = {}) => {
-    const from = socket.data.role === "guest" ? "guest" : "ema";
-    if (socket.data.role !== "ema" && socket.data.role !== "guest") {
+    if (!isStaff(socket) && socket.data.role !== "guest") {
       socket.emit("error_message", { error: "Nemaš pristup." });
       return;
     }
+    const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = createCallMessage(id, from, kind);
     if (!result.ok) {
@@ -513,6 +507,10 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_voice", ({ conversationId, audio, mime } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") {
+      socket.emit("error_message", { error: "Nemaš pristup." });
+      return;
+    }
     const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = createVoiceMessage(id, from, audio, mime);
@@ -521,6 +519,24 @@ io.on("connection", (socket) => {
       return;
     }
     emitConversation(id, "new_message", result.message);
+  });
+
+  socket.on("send_reaction", ({ conversationId, kind } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") {
+      socket.emit("error_message", { error: "Nemaš pristup." });
+      return;
+    }
+    const from = socket.data.role === "guest" ? "guest" : "ema";
+    const id = conversationId || socket.data.conversationId;
+    const result = createReactionMessage(id, from, kind);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    emitConversation(id, "new_message", result.message);
+    if (result.conversation) {
+      emitConversation(id, "patience", { conversation: result.conversation });
+    }
   });
 
   socket.on("disconnect", () => {

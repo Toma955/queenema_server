@@ -3,6 +3,7 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import {
+  adminUpdateEmaProfile,
   createRequest,
   createInvite,
   createTextMessage,
@@ -20,13 +21,16 @@ import {
   getMessages,
   getPublicAvailability,
   getRequestByToken,
+  getStateForAdmin,
   getStateForEma,
+  loginAdmin,
   loginEma,
   PATIENCE,
   resolveMediaFile,
   respondToRequest,
   setAcceptNewConversations,
   setPatience,
+  updateAdminProfile,
   updateEmaProfile,
   wipeConversation,
 } from "./db.js";
@@ -81,9 +85,23 @@ app.use(cors({ origin: isAllowedOrigin }));
 app.use(express.json({ limit: "6mb" }));
 
 const emaSockets = new Set();
+const adminSockets = new Set();
 
 function broadcastEma(event, payload) {
   for (const id of emaSockets) io.to(id).emit(event, payload);
+}
+
+function broadcastAdmin(event, payload) {
+  for (const id of adminSockets) io.to(id).emit(event, payload);
+}
+
+function broadcastStaff(event, payload) {
+  broadcastEma(event, payload);
+  broadcastAdmin(event, payload);
+}
+
+function isStaff(socket) {
+  return socket.data.role === "ema" || socket.data.role === "admin";
 }
 
 function emitConversation(conversationId, event, payload) {
@@ -107,6 +125,12 @@ app.post("/api/login", (req, res) => {
   res.json({ user: result.user, ...getStateForEma() });
 });
 
+app.post("/api/admin/login", (req, res) => {
+  const result = loginAdmin(req.body?.username, req.body?.password);
+  if (!result.ok) return res.status(401).json({ error: result.error });
+  res.json({ user: result.user, ...getStateForAdmin() });
+});
+
 app.post("/api/ema/profile", (req, res) => {
   const result = updateEmaProfile({
     name: req.body?.name,
@@ -116,6 +140,28 @@ app.post("/api/ema/profile", (req, res) => {
   });
   if (!result.ok) return res.status(400).json({ error: result.error });
   res.json({ user: result.user });
+});
+
+app.post("/api/admin/profile", (req, res) => {
+  const result = updateAdminProfile({
+    name: req.body?.name,
+    username: req.body?.username,
+    password: req.body?.password,
+    currentPassword: req.body?.currentPassword,
+  });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json({ user: result.user });
+});
+
+app.post("/api/admin/ema-profile", (req, res) => {
+  const result = adminUpdateEmaProfile({
+    name: req.body?.name,
+    username: req.body?.username,
+    password: req.body?.password,
+  });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  broadcastStaff("ema_profile", result.ema);
+  res.json(result);
 });
 
 app.post("/api/invite", (_req, res) => {
@@ -151,6 +197,7 @@ app.post("/api/request", (req, res) => {
     return res.status(status).json(result);
   }
   broadcastEma("new_request", result.request);
+  broadcastAdmin("admin_state", getStateForAdmin());
   res.json(result);
 });
 
@@ -229,6 +276,12 @@ io.on("connection", (socket) => {
     });
   });
 
+  socket.on("admin_hello", () => {
+    socket.data.role = "admin";
+    adminSockets.add(socket.id);
+    socket.emit("admin_state", getStateForAdmin());
+  });
+
   socket.on("guest_hello", ({ guestToken }) => {
     if (!guestToken) return;
     socket.data.role = "guest";
@@ -242,9 +295,10 @@ io.on("connection", (socket) => {
   });
 
   socket.on("set_accept_new", ({ value }) => {
-    if (socket.data.role !== "ema") return;
+    if (!isStaff(socket)) return;
     const settings = setAcceptNewConversations(value);
-    broadcastEma("settings", settings);
+    broadcastStaff("settings", settings);
+    broadcastAdmin("admin_state", getStateForAdmin());
     io.emit("availability", {
       ...getPublicAvailability(),
       emaOnline: emaSockets.size > 0,
@@ -252,13 +306,14 @@ io.on("connection", (socket) => {
   });
 
   socket.on("respond_request", ({ requestId, accept }) => {
-    if (socket.data.role !== "ema") return;
+    if (!isStaff(socket)) return;
     const result = respondToRequest(requestId, accept);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
       return;
     }
     broadcastEma("ema_state", getStateForEma());
+    broadcastAdmin("admin_state", getStateForAdmin());
     if (result.rejected) {
       io.emit("request_rejected", { guestToken: result.guestToken });
       return;
@@ -284,6 +339,9 @@ io.on("connection", (socket) => {
       }
       socket.data.role = "guest";
       socket.data.guestToken = guestToken;
+    } else if (role === "admin" || socket.data.role === "admin") {
+      socket.data.role = "admin";
+      adminSockets.add(socket.id);
     } else {
       socket.data.role = "ema";
       emaSockets.add(socket.id);
@@ -313,8 +371,44 @@ io.on("connection", (socket) => {
     });
   });
 
+  socket.on("admin_peek", ({ conversationId }) => {
+    if (socket.data.role !== "admin") return;
+    const c = getConversation(conversationId);
+    if (!c) {
+      socket.emit("error_message", { error: "Razgovor nije pronađen." });
+      return;
+    }
+    socket.join(`conv:${c.id}`);
+    socket.data.conversationId = c.id;
+    socket.emit("conversation_state", {
+      conversation: publicish(c),
+      messages: getMessages(c.id),
+    });
+  });
+
+  function publicish(c) {
+    return {
+      id: c.id,
+      guestName: c.guestName,
+      guestBio: c.guestBio,
+      guestAvatar: c.guestAvatar,
+      meta: c.meta,
+      status: c.status,
+      patience: c.patience,
+      features: featuresForPatience(c.patience),
+      limits: {
+        maxMessages: featuresForPatience(c.patience).maxMessages,
+        maxChars: featuresForPatience(c.patience).maxChars,
+      },
+      coffeeInvited: Boolean(c.coffeeInvited),
+      created_at: c.created_at,
+      ended_at: c.ended_at,
+      end_reason: c.end_reason,
+    };
+  }
+
   socket.on("set_patience", ({ conversationId, patience }) => {
-    if (socket.data.role !== "ema") return;
+    if (!isStaff(socket)) return;
     const result = setPatience(conversationId, patience);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
@@ -326,8 +420,9 @@ io.on("connection", (socket) => {
         guestToken: result.guestToken,
       };
       io.to(`conv:${result.conversationId}`).emit("conversation_wiped", payload);
-      broadcastEma("conversation_wiped", payload);
+      broadcastStaff("conversation_wiped", payload);
       broadcastEma("ema_state", getStateForEma());
+      broadcastAdmin("admin_state", getStateForAdmin());
       return;
     }
     emitConversation(conversationId, "patience", {
@@ -337,20 +432,22 @@ io.on("connection", (socket) => {
       emitConversation(conversationId, "new_message", notice);
     }
     broadcastEma("ema_state", getStateForEma());
+    broadcastAdmin("admin_state", getStateForAdmin());
   });
 
   socket.on("end_conversation", ({ conversationId }) => {
-    if (socket.data.role !== "ema") return;
+    if (!isStaff(socket)) return;
     const result = endConversation(conversationId, "manual");
     if (!result.ok) return;
     emitConversation(conversationId, "conversation_ended", {
       conversation: result.conversation,
     });
     broadcastEma("ema_state", getStateForEma());
+    broadcastAdmin("admin_state", getStateForAdmin());
   });
 
   socket.on("wipe_conversation", ({ conversationId }) => {
-    if (socket.data.role !== "ema") return;
+    if (!isStaff(socket)) return;
     const result = wipeConversation(conversationId);
     if (!result.ok) return;
     io.to(`conv:${result.conversationId}`).emit("conversation_wiped", {
@@ -358,6 +455,7 @@ io.on("connection", (socket) => {
       guestToken: result.guestToken,
     });
     broadcastEma("ema_state", getStateForEma());
+    broadcastAdmin("admin_state", getStateForAdmin());
   });
 
   socket.on("send_message", ({ conversationId, text } = {}) => {
@@ -427,6 +525,7 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     emaSockets.delete(socket.id);
+    adminSockets.delete(socket.id);
     io.emit("availability", {
       ...getPublicAvailability(),
       emaOnline: emaSockets.size > 0,

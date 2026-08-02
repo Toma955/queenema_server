@@ -45,6 +45,12 @@ export const EMA_DEFAULTS = {
   name: "Ema",
 };
 
+export const ADMIN_DEFAULTS = {
+  username: "admin",
+  password: "admin",
+  name: "Admin",
+};
+
 /** @deprecated use getEmaProfile() — kept for health payload */
 export const EMA = EMA_DEFAULTS;
 
@@ -52,6 +58,7 @@ function defaultStore() {
   return {
     settings: { acceptNewConversations: false },
     profile: { ...EMA_DEFAULTS },
+    adminProfile: { ...ADMIN_DEFAULTS },
     invites: [],
     requests: [],
     conversations: [],
@@ -73,6 +80,7 @@ function loadStore() {
       ...parsed,
       settings: { ...defaultStore().settings, ...(parsed.settings || {}) },
       profile: { ...EMA_DEFAULTS, ...(parsed.profile || {}) },
+      adminProfile: { ...ADMIN_DEFAULTS, ...(parsed.adminProfile || {}) },
       invites: parsed.invites || [],
       requests: parsed.requests || [],
       conversations: parsed.conversations || [],
@@ -216,6 +224,75 @@ export function loginEma(username, password) {
   };
 }
 
+export function loginAdmin(username, password) {
+  const u = String(username || "").trim().toLowerCase();
+  const p = String(password || "");
+  const profile = store.adminProfile || ADMIN_DEFAULTS;
+  if (u !== String(profile.username).toLowerCase() || !safeEqual(p, profile.password)) {
+    return { ok: false, error: "Pogrešan username ili password." };
+  }
+  return {
+    ok: true,
+    user: {
+      role: "admin",
+      name: profile.name,
+      username: profile.username,
+    },
+  };
+}
+
+export function getAdminProfile() {
+  const profile = store.adminProfile || ADMIN_DEFAULTS;
+  return {
+    username: profile.username,
+    name: profile.name,
+  };
+}
+
+export function updateAdminProfile({ name, username, password, currentPassword }) {
+  const profile = store.adminProfile || { ...ADMIN_DEFAULTS };
+  if (!safeEqual(String(currentPassword || ""), profile.password)) {
+    return { ok: false, error: "Trenutna lozinka nije točna." };
+  }
+  const nextName = String(name ?? profile.name).trim().slice(0, 40);
+  const nextUser = String(username ?? profile.username).trim().toLowerCase().slice(0, 32);
+  if (!nextUser) return { ok: false, error: "Username je obavezan." };
+  profile.name = nextName || profile.name;
+  profile.username = nextUser;
+  if (password) {
+    const nextPass = String(password);
+    if (nextPass.length < 3) return { ok: false, error: "Nova lozinka je prekratka." };
+    profile.password = nextPass;
+  }
+  store.adminProfile = profile;
+  saveStore(store);
+  return {
+    ok: true,
+    user: { role: "admin", name: profile.name, username: profile.username },
+  };
+}
+
+/** Admin može resetirati Emine podatke (bez Emine trenutne lozinke). */
+export function adminUpdateEmaProfile({ name, username, password }) {
+  const profile = store.profile || { ...EMA_DEFAULTS };
+  const nextName = String(name ?? profile.name).trim().slice(0, 40);
+  const nextUser = String(username ?? profile.username).trim().toLowerCase().slice(0, 32);
+  if (!nextUser) return { ok: false, error: "Username je obavezan." };
+  profile.name = nextName || profile.name;
+  profile.username = nextUser;
+  if (password) {
+    const nextPass = String(password);
+    if (nextPass.length < 3) return { ok: false, error: "Nova lozinka je prekratka." };
+    profile.password = nextPass;
+  }
+  store.profile = profile;
+  saveStore(store);
+  return {
+    ok: true,
+    ema: { name: profile.name, username: profile.username },
+  };
+}
+
 export function updateEmaProfile({ name, username, password, currentPassword }) {
   const profile = store.profile || { ...EMA_DEFAULTS };
   if (!safeEqual(String(currentPassword || ""), profile.password)) {
@@ -286,6 +363,32 @@ export function getStateForEma() {
     conversations: store.conversations
       .filter((c) => c.status === "active")
       .map(publicConversation),
+    leaderboard: getLeaderboard(),
+  };
+}
+
+/** Pun admin pregled — sve zahtjeve, sve razgovore, Emine podatke. */
+export function getStateForAdmin() {
+  return {
+    settings: getSettings(),
+    availability: getPublicAvailability(),
+    ema: getEmaProfile(),
+    admin: getAdminProfile(),
+    requests: [...store.requests]
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))
+      .slice(0, 100)
+      .map((r) => ({
+        id: r.id,
+        guestName: r.guestName,
+        guestBio: r.guestBio,
+        guestAvatar: r.guestAvatar,
+        status: r.status,
+        meta: r.meta,
+        created_at: r.created_at,
+      })),
+    conversations: store.conversations
+      .map(publicConversation)
+      .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))),
     leaderboard: getLeaderboard(),
   };
 }

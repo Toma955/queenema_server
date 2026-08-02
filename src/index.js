@@ -506,14 +506,14 @@ io.on("connection", (socket) => {
     emitConversation(id, "new_message", result.message);
   });
 
-  socket.on("send_voice", ({ conversationId, audio, mime } = {}) => {
+  socket.on("send_voice", ({ conversationId, audio, mime, durationSec } = {}) => {
     if (!isStaff(socket) && socket.data.role !== "guest") {
       socket.emit("error_message", { error: "Nemaš pristup." });
       return;
     }
     const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
-    const result = createVoiceMessage(id, from, audio, mime);
+    const result = createVoiceMessage(id, from, audio, mime, durationSec);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
       return;

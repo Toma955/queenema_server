@@ -783,6 +783,7 @@ function mapMessage(m) {
     reaction: m.reaction || null,
     reactions: Array.isArray(m.reactions) ? m.reactions : [],
     media_url: m.media_path ? `/api/media/${path.basename(m.media_path)}` : null,
+    duration_sec: Number.isFinite(m.duration_sec) ? m.duration_sec : null,
     created_at: m.created_at,
   };
 }
@@ -975,7 +976,13 @@ export function createCallMessage(conversationId, from, kind) {
   };
 }
 
-export function createVoiceMessage(conversationId, from, base64Audio, mime = "audio/webm") {
+export function createVoiceMessage(
+  conversationId,
+  from,
+  base64Audio,
+  mime = "audio/webm",
+  durationSec = null
+) {
   const c = getConversation(conversationId);
   if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
   if (from === "guest" && !featuresForPatience(c.patience).voice) {
@@ -1008,6 +1015,7 @@ export function createVoiceMessage(conversationId, from, base64Audio, mime = "au
   const fullPath = path.join(mediaDir, `${randomUUID()}.${ext}`);
   fs.writeFileSync(fullPath, buffer);
 
+  const dur = Number(durationSec);
   const message = {
     id: nextId(),
     conversation_id: c.id,
@@ -1015,6 +1023,7 @@ export function createVoiceMessage(conversationId, from, base64Audio, mime = "au
     type: "voice",
     text: "",
     media_path: fullPath,
+    duration_sec: Number.isFinite(dur) && dur > 0 ? Math.min(600, dur) : null,
     created_at: new Date().toISOString(),
   };
   store.messages.push(message);

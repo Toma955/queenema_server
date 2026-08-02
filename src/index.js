@@ -3,17 +3,26 @@ import express from "express";
 import http from "http";
 import { Server } from "socket.io";
 import {
-  clearMessages,
+  createRequest,
   createTextMessage,
   createVoiceMessage,
+  EMA,
+  endConversation,
+  featuresForPatience,
+  getConversation,
+  getConversationByGuestToken,
+  getLeaderboard,
   getMessages,
-  getMode,
-  getUserById,
-  joinAsRole,
-  listUsers,
-  resolveVoiceFile,
-  ROLES,
-  setMode,
+  getPublicAvailability,
+  getRequestByToken,
+  getStateForEma,
+  loginEma,
+  PATIENCE,
+  resolveMediaFile,
+  respondToRequest,
+  setAcceptNewConversations,
+  setPatience,
+  wipeConversation,
 } from "./db.js";
 
 const PORT = Number(process.env.PORT) || 3001;
@@ -26,6 +35,8 @@ const defaultOrigins = [
   "https://queenema.art",
   "https://www.queenema.art",
   "https://admin.queenema.art",
+  "https://queenema-ema.vercel.app",
+  "https://queenema-admin.vercel.app",
 ];
 
 const allowedOrigins = [
@@ -36,168 +47,322 @@ const allowedOrigins = [
     .filter(Boolean),
 ];
 
-function isAllowedOrigin(origin) {
-  if (!origin) return true;
-  if (allowedOrigins.includes(origin)) return true;
-  // Vercel preview / production aliases
-  if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return true;
-  return false;
+function isAllowedOrigin(origin, callback) {
+  if (!origin) return callback(null, true);
+  if (allowedOrigins.includes(origin)) return callback(null, true);
+  if (/^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(origin)) return callback(null, true);
+  return callback(null, false);
+}
+
+function clientIp(req) {
+  const xf = req.headers["x-forwarded-for"];
+  if (typeof xf === "string" && xf.length) return xf.split(",")[0].trim();
+  return req.socket?.remoteAddress || "";
 }
 
 const app = express();
 const server = http.createServer(app);
-
 const io = new Server(server, {
-  cors: { origin: isAllowedOrigin, methods: ["GET", "POST"] },
-  maxHttpBufferSize: 4e6,
-  pingInterval: 25000,
-  pingTimeout: 20000,
+  cors: {
+    origin: allowedOrigins.concat([/^https:\/\/[a-z0-9-]+\.vercel\.app$/i]),
+    methods: ["GET", "POST"],
+  },
+  maxHttpBufferSize: 6e6,
 });
 
 app.set("trust proxy", 1);
 app.use(cors({ origin: isAllowedOrigin }));
-app.use(express.json({ limit: "4mb" }));
+app.use(express.json({ limit: "6mb" }));
+
+const emaSockets = new Set();
+
+function broadcastEma(event, payload) {
+  for (const id of emaSockets) io.to(id).emit(event, payload);
+}
+
+function emitConversation(conversationId, event, payload) {
+  io.to(`conv:${conversationId}`).emit(event, payload);
+}
 
 app.get("/api/health", (_req, res) => {
+  res.json({ ok: true, name: "queenema", ema: EMA.name, patience: PATIENCE });
+});
+
+app.get("/api/availability", (_req, res) => {
   res.json({
-    ok: true,
-    name: "queenema",
-    pair: { admin: ROLES.toma.name, mobile: ROLES.ema.name },
-    mode: getMode(),
-    maxPeople: 2,
+    ...getPublicAvailability(),
+    emaOnline: emaSockets.size > 0,
   });
 });
 
-app.get("/api/chat", (_req, res) => {
-  res.json({
-    mode: getMode(),
-    pair: { admin: ROLES.toma, mobile: ROLES.ema },
-    users: listUsers().map((u) => ({ id: u.id, name: u.name, role: u.role })),
-    messages: getMessages(),
-  });
+app.post("/api/login", (req, res) => {
+  const result = loginEma(req.body?.username, req.body?.password);
+  if (!result.ok) return res.status(401).json({ error: result.error });
+  res.json({ user: result.user, ...getStateForEma() });
 });
 
-app.post("/api/join", (req, res) => {
-  const role = String(req.body?.role ?? "").toLowerCase();
-  const result = joinAsRole(role);
-  if (!result.ok) return res.status(403).json({ error: result.error });
-  res.json({
-    user: result.user,
-    mode: getMode(),
-    users: listUsers().map((u) => ({ id: u.id, name: u.name, role: u.role })),
-    messages: getMessages(),
-  });
+app.get("/api/ema/state", (_req, res) => {
+  res.json(getStateForEma());
 });
 
-app.get("/api/voice/:file", (req, res) => {
-  const file = resolveVoiceFile(req.params.file);
+app.get("/api/ema/leaderboard", (_req, res) => {
+  res.json(getLeaderboard());
+});
+
+app.post("/api/request", (req, res) => {
+  const result = createRequest({
+    name: req.body?.name,
+    bio: req.body?.bio,
+    avatar: req.body?.avatar,
+    avatarMime: req.body?.avatarMime,
+    guestToken: req.body?.guestToken,
+    meta: {
+      device: req.body?.device,
+      userAgent: req.body?.userAgent || req.headers["user-agent"],
+      cookiesAccepted: req.body?.cookiesAccepted,
+      ip: clientIp(req),
+    },
+  });
+  if (!result.ok) {
+    const status = result.code === "already_active" || result.code === "already_pending" ? 409 : 403;
+    return res.status(status).json(result);
+  }
+  broadcastEma("new_request", result.request);
+  res.json(result);
+});
+
+function guestPayload(token) {
+  const conversation = getConversationByGuestToken(token);
+  if (conversation?.status === "active") {
+    return {
+      status: "active",
+      conversation: {
+        id: conversation.id,
+        guestName: conversation.guestName,
+        status: conversation.status,
+        patience: conversation.patience,
+        features: featuresForPatience(conversation.patience),
+        limits: {
+          maxMessages: featuresForPatience(conversation.patience).maxMessages,
+          maxChars: featuresForPatience(conversation.patience).maxChars,
+        },
+        coffeeInvited: Boolean(conversation.coffeeInvited),
+        created_at: conversation.created_at,
+      },
+      messages: getMessages(conversation.id),
+    };
+  }
+  const request = getRequestByToken(token);
+  if (request?.status === "pending") {
+    return { status: "pending", guestName: request.guestName };
+  }
+  if (request?.status === "rejected") {
+    return { status: "rejected" };
+  }
+  if (conversation?.status === "ended") {
+    return { status: "ended" };
+  }
+  return { status: "gone" };
+}
+
+app.get("/api/guest/:token", (req, res) => {
+  res.json(guestPayload(req.params.token));
+});
+
+app.get("/api/media/:file", (req, res) => {
+  const file = resolveMediaFile(req.params.file);
   if (!file) return res.status(404).end();
   res.sendFile(file);
 });
 
-const onlineByUserId = new Map();
-
-function presencePayload() {
-  const onlineIds = [...onlineByUserId.keys()];
-  return {
-    mode: getMode(),
-    onlineUserIds: onlineIds,
-    users: listUsers().map((u) => ({
-      id: u.id,
-      name: u.name,
-      role: u.role,
-      online: onlineIds.includes(u.id),
-    })),
-  };
-}
-
-function broadcastPresence() {
-  io.emit("presence", presencePayload());
-}
-
 io.on("connection", (socket) => {
-  socket.on("join", ({ userId }) => {
-    const user = getUserById(userId);
-    if (!user || (user.role !== "toma" && user.role !== "ema")) {
-      socket.emit("error_message", { error: "Korisnik nije pronađen." });
-      return;
+  const authToken = socket.handshake.auth?.guestToken;
+  if (authToken) {
+    socket.data.role = "guest";
+    socket.data.guestToken = authToken;
+    const payload = guestPayload(authToken);
+    socket.emit("guest_state", payload);
+    if (payload.status === "active" && payload.conversation) {
+      socket.data.conversationId = payload.conversation.id;
+      socket.join(`conv:${payload.conversation.id}`);
     }
+  }
 
-    socket.data.userId = user.id;
-    socket.data.userName = user.name;
-    socket.data.role = user.role;
-    socket.join("chat");
-
-    if (!onlineByUserId.has(user.id)) onlineByUserId.set(user.id, new Set());
-    onlineByUserId.get(user.id).add(socket.id);
-
-    socket.emit("chat_state", {
-      messages: getMessages(),
-      mode: getMode(),
-      ...presencePayload(),
+  socket.on("ema_hello", () => {
+    socket.data.role = "ema";
+    emaSockets.add(socket.id);
+    socket.emit("ema_state", getStateForEma());
+    io.emit("availability", {
+      ...getPublicAvailability(),
+      emaOnline: emaSockets.size > 0,
     });
-    broadcastPresence();
   });
 
-  socket.on("set_mode", ({ mode }) => {
-    if (socket.data.role !== "toma") {
-      socket.emit("error_message", { error: "Samo admin mijenja mode." });
-      return;
+  socket.on("guest_hello", ({ guestToken }) => {
+    if (!guestToken) return;
+    socket.data.role = "guest";
+    socket.data.guestToken = guestToken;
+    const payload = guestPayload(guestToken);
+    socket.emit("guest_state", payload);
+    if (payload.status === "active" && payload.conversation) {
+      socket.data.conversationId = payload.conversation.id;
+      socket.join(`conv:${payload.conversation.id}`);
     }
-    const result = setMode(mode);
+  });
+
+  socket.on("set_accept_new", ({ value }) => {
+    if (socket.data.role !== "ema") return;
+    const settings = setAcceptNewConversations(value);
+    broadcastEma("settings", settings);
+    io.emit("availability", {
+      ...getPublicAvailability(),
+      emaOnline: emaSockets.size > 0,
+    });
+  });
+
+  socket.on("respond_request", ({ requestId, accept }) => {
+    if (socket.data.role !== "ema") return;
+    const result = respondToRequest(requestId, accept);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
       return;
     }
-    io.emit("mode_changed", { mode: result.mode });
-  });
-
-  socket.on("send_message", ({ text }) => {
-    const userId = socket.data.userId;
-    if (!userId) {
-      socket.emit("error_message", { error: "Nisi prijavljen." });
+    broadcastEma("ema_state", getStateForEma());
+    if (result.rejected) {
+      io.emit("request_rejected", { guestToken: result.guestToken });
       return;
     }
-    const result = createTextMessage(userId, text ?? "");
+    broadcastEma("conversation_started", result.conversation);
+    io.emit("request_accepted", {
+      guestToken: result.guestToken,
+      conversation: result.conversation,
+    });
+    io.emit("conversation_started", result.conversation);
+  });
+
+  socket.on("join_conversation", ({ conversationId, role, guestToken }) => {
+    const c = getConversation(conversationId);
+    if (!c || c.status !== "active") {
+      socket.emit("error_message", { error: "Razgovor nije pronađen." });
+      return;
+    }
+    if (role === "guest") {
+      if (c.guestToken !== guestToken) {
+        socket.emit("error_message", { error: "Nedozvoljen pristup." });
+        return;
+      }
+      socket.data.role = "guest";
+      socket.data.guestToken = guestToken;
+    } else {
+      socket.data.role = "ema";
+      emaSockets.add(socket.id);
+    }
+    socket.data.conversationId = c.id;
+    socket.join(`conv:${c.id}`);
+
+    const pub = {
+      id: c.id,
+      guestName: c.guestName,
+      guestBio: c.guestBio,
+      guestAvatar: c.guestAvatar,
+      meta: c.meta,
+      status: c.status,
+      patience: c.patience,
+      features: featuresForPatience(c.patience),
+      limits: {
+        maxMessages: featuresForPatience(c.patience).maxMessages,
+        maxChars: featuresForPatience(c.patience).maxChars,
+      },
+      coffeeInvited: Boolean(c.coffeeInvited),
+      created_at: c.created_at,
+    };
+    socket.emit("conversation_state", {
+      conversation: pub,
+      messages: getMessages(c.id),
+    });
+  });
+
+  socket.on("set_patience", ({ conversationId, patience }) => {
+    if (socket.data.role !== "ema") return;
+    const result = setPatience(conversationId, patience);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
       return;
     }
-    io.to("chat").emit("new_message", result.message);
-  });
-
-  socket.on("send_voice", ({ audio, mime }) => {
-    const userId = socket.data.userId;
-    if (!userId) {
-      socket.emit("error_message", { error: "Nisi prijavljen." });
+    if (result.wiped) {
+      io.to(`conv:${result.conversationId}`).emit("conversation_wiped", {
+        conversationId: result.conversationId,
+        guestToken: result.guestToken,
+      });
+      broadcastEma("ema_state", getStateForEma());
       return;
     }
-    const result = createVoiceMessage(userId, audio, mime);
+    emitConversation(conversationId, "patience", {
+      conversation: result.conversation,
+    });
+    broadcastEma("ema_state", getStateForEma());
+  });
+
+  socket.on("end_conversation", ({ conversationId }) => {
+    if (socket.data.role !== "ema") return;
+    const result = endConversation(conversationId, "manual");
+    if (!result.ok) return;
+    emitConversation(conversationId, "conversation_ended", {
+      conversation: result.conversation,
+    });
+    broadcastEma("ema_state", getStateForEma());
+  });
+
+  socket.on("wipe_conversation", ({ conversationId }) => {
+    if (socket.data.role !== "ema") return;
+    const result = wipeConversation(conversationId);
+    if (!result.ok) return;
+    io.to(`conv:${result.conversationId}`).emit("conversation_wiped", {
+      conversationId: result.conversationId,
+      guestToken: result.guestToken,
+    });
+    broadcastEma("ema_state", getStateForEma());
+  });
+
+  socket.on("send_message", ({ conversationId, text } = {}) => {
+    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const id = conversationId || socket.data.conversationId;
+    const result = createTextMessage(id, from, text);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
       return;
     }
-    io.to("chat").emit("new_message", result.message);
+    emitConversation(id, "new_message", result.message);
+    emitConversation(id, "patience", {
+      conversation: result.conversation,
+    });
   });
 
-  socket.on("clear_messages", () => {
-    if (socket.data.role !== "toma") {
-      socket.emit("error_message", { error: "Samo admin može obrisati chat." });
+  socket.on("send_voice", ({ conversationId, audio, mime } = {}) => {
+    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const id = conversationId || socket.data.conversationId;
+    const result = createVoiceMessage(id, from, audio, mime);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
       return;
     }
-    clearMessages();
-    io.to("chat").emit("chat_cleared");
+    emitConversation(id, "new_message", result.message);
   });
 
   socket.on("disconnect", () => {
-    const userId = socket.data.userId;
-    if (!userId) return;
-    const sockets = onlineByUserId.get(userId);
-    if (sockets) {
-      sockets.delete(socket.id);
-      if (sockets.size === 0) onlineByUserId.delete(userId);
-    }
-    broadcastPresence();
+    emaSockets.delete(socket.id);
+    io.emit("availability", {
+      ...getPublicAvailability(),
+      emaOnline: emaSockets.size > 0,
+    });
+  });
+});
+
+app.use((req, res) => {
+  res.status(404).json({
+    error: "Stranica nedostupna",
+    code: 404,
+    path: req.path,
   });
 });
 

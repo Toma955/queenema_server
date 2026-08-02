@@ -132,6 +132,8 @@ app.get("/api/invite/:token", (req, res) => {
 app.post("/api/request", (req, res) => {
   const result = createRequest({
     name: req.body?.name,
+    firstName: req.body?.firstName,
+    lastName: req.body?.lastName,
     bio: req.body?.bio,
     avatar: req.body?.avatar,
     avatarMime: req.body?.avatarMime,

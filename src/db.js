@@ -356,7 +356,17 @@ function saveAvatar(avatar, mimeHint = "image/jpeg") {
   return `/api/media/${filename}`;
 }
 
-export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken, inviteToken }) {
+export function createRequest({
+  name,
+  firstName,
+  lastName,
+  bio,
+  avatar,
+  avatarMime,
+  meta,
+  guestToken,
+  inviteToken,
+}) {
   const avail = getPublicAvailability();
   if (!avail.acceptNewConversations) {
     return {
@@ -425,8 +435,18 @@ export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken,
     }
   }
 
-  const guestName = String(name || "").trim().slice(0, 48);
-  if (!guestName) return { ok: false, error: "Ime i prezime su obavezni." };
+  const first = String(firstName || "").trim().slice(0, 32);
+  const last = String(lastName || "").trim().slice(0, 32);
+  const fromLegacy = String(name || "").trim().slice(0, 48);
+  let finalName = "";
+  if (first || last || firstName != null || lastName != null) {
+    if (!first) return { ok: false, error: "Ime je obavezno." };
+    if (!last) return { ok: false, error: "Prezime je obavezno." };
+    finalName = `${first} ${last}`.slice(0, 64);
+  } else {
+    finalName = fromLegacy;
+    if (!finalName) return { ok: false, error: "Ime i prezime su obavezni." };
+  }
   const guestBio = String(bio || "").trim().slice(0, 500);
   if (!guestBio) return { ok: false, error: "Opis je obavezan." };
 
@@ -440,7 +460,7 @@ export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken,
 
   const request = {
     id: nextId(),
-    guestName,
+    guestName: finalName,
     guestBio,
     guestAvatar,
     inviteToken: String(inviteToken || "").trim() || null,

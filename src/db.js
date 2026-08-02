@@ -581,17 +581,68 @@ export function setPatience(conversationId, patience) {
   const c = getConversation(conversationId);
   if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
 
+  const prev = Number(c.patience) || 0;
+  const prevFeats = featuresForPatience(prev);
   const next = Math.max(PATIENCE.MIN, Math.min(PATIENCE.MAX, Math.round(Number(patience))));
   c.patience = next;
 
   if (next >= PATIENCE.COFFEE) c.coffeeInvited = true;
-  saveStore(store);
 
   if (next <= PATIENCE.WIPE) {
+    saveStore(store);
     return wipeConversation(c.id);
   }
 
-  return { ok: true, conversation: publicConversation(c) };
+  const nextFeats = featuresForPatience(next);
+  const notices = [];
+
+  if (prev !== next) {
+    notices.push(pushSystemMessage(c.id, `Zainteresiranost: ${next}`));
+  }
+
+  const toggles = [
+    ["like", "like"],
+    ["smile", "smile"],
+    ["voice", "glasovne poruke"],
+    ["photo", "slike"],
+    ["call", "poziv"],
+    ["video", "videopoziv"],
+    ["heart", "srce"],
+    ["coffee", "kava"],
+  ];
+  for (const [key, label] of toggles) {
+    if (!prevFeats[key] && nextFeats[key]) {
+      notices.push(pushSystemMessage(c.id, `Otključano: ${label}`));
+    } else if (prevFeats[key] && !nextFeats[key]) {
+      notices.push(pushSystemMessage(c.id, `Onemogućeno: ${label}`));
+    }
+  }
+  if (prevFeats.limited && !nextFeats.limited) {
+    notices.push(pushSystemMessage(c.id, "Otključano: slobodan tekst"));
+  } else if (!prevFeats.limited && nextFeats.limited) {
+    notices.push(pushSystemMessage(c.id, "Onemogućeno: slobodan tekst"));
+  }
+
+  saveStore(store);
+  return {
+    ok: true,
+    conversation: publicConversation(c),
+    notices: notices.map(mapMessage),
+  };
+}
+
+function pushSystemMessage(conversationId, text) {
+  const message = {
+    id: nextId(),
+    conversation_id: Number(conversationId),
+    from: "system",
+    type: "system",
+    text: String(text),
+    media_path: null,
+    created_at: new Date().toISOString(),
+  };
+  store.messages.push(message);
+  return message;
 }
 
 export function endConversation(conversationId, reason = "manual") {
@@ -766,7 +817,7 @@ export function reactToMessage(conversationId, from, messageId, kind) {
   return { ok: true, message: mapMessage(message) };
 }
 
-/** Ema šalje poziv / videopoziv; gost samo prima (ako ima unlock vidi akciju) */
+/** Poziv / videopoziv — samo ako je otključano (Ema i gost). */
 export function createCallMessage(conversationId, from, kind) {
   const c = getConversation(conversationId);
   if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
@@ -774,8 +825,16 @@ export function createCallMessage(conversationId, from, kind) {
   const spec = CALL_KIND[kind];
   if (!spec) return { ok: false, error: "Nepoznat tip poziva." };
 
-  if (from !== "ema") {
-    return { ok: false, error: "Samo Ema može pokrenuti poziv." };
+  const feats = featuresForPatience(c.patience);
+  if (!feats[spec.feature]) {
+    return {
+      ok: false,
+      error: `${spec.label[0].toUpperCase()}${spec.label.slice(1)} još nije otključan.`,
+    };
+  }
+
+  if (from !== "ema" && from !== "guest") {
+    return { ok: false, error: "Nepoznata uloga." };
   }
 
   const message = {

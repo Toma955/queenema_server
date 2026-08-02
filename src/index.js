@@ -333,6 +333,9 @@ io.on("connection", (socket) => {
     emitConversation(conversationId, "patience", {
       conversation: result.conversation,
     });
+    for (const notice of result.notices || []) {
+      emitConversation(conversationId, "new_message", notice);
+    }
     broadcastEma("ema_state", getStateForEma());
   });
 
@@ -397,12 +400,13 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_call", ({ conversationId, kind } = {}) => {
-    if (socket.data.role !== "ema") {
-      socket.emit("error_message", { error: "Samo Ema može pokrenuti poziv." });
+    const from = socket.data.role === "ema" ? "ema" : "guest";
+    if (socket.data.role !== "ema" && socket.data.role !== "guest") {
+      socket.emit("error_message", { error: "Nemaš pristup." });
       return;
     }
     const id = conversationId || socket.data.conversationId;
-    const result = createCallMessage(id, "ema", kind);
+    const result = createCallMessage(id, from, kind);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
       return;

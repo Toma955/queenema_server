@@ -1,6 +1,7 @@
 import cors from "cors";
 import express from "express";
 import http from "http";
+import crypto from "crypto";
 import { Server } from "socket.io";
 import {
   adminUpdateEmaProfile,
@@ -117,36 +118,63 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, name: "queenema", ema: getEmaProfile().name, patience: PATIENCE });
 });
 
-/** ICE/TURN config za WebRTC pozive */
+/** ICE/TURN config za WebRTC pozive — dinamički Open Relay static-auth + free fallbacki */
 app.get("/api/ice", (_req, res) => {
   const iceServers = [
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun.relay.metered.ca:80" },
+    { urls: "stun:freestun.net:3478" },
   ];
 
+  // Open Relay static-auth (javni secret iz dokumentacije)
+  const secret =
+    process.env.TURN_STATIC_SECRET || "openrelayprojectsecret";
+  const ttl = 12 * 3600;
+  const unix = Math.floor(Date.now() / 1000) + ttl;
+  const username = `${unix}:queenema`;
+  const credential = crypto
+    .createHmac("sha1", secret)
+    .update(username)
+    .digest("base64");
+
+  iceServers.push({
+    urls: [
+      "turn:staticauth.openrelay.metered.ca:80",
+      "turn:staticauth.openrelay.metered.ca:80?transport=tcp",
+      "turn:staticauth.openrelay.metered.ca:443",
+      "turns:staticauth.openrelay.metered.ca:443?transport=tcp",
+    ],
+    username,
+    credential,
+  });
+
+  // freestun public free TURN
+  iceServers.push({
+    urls: [
+      "turn:freestun.net:3478",
+      "turn:freestun.net:3478?transport=tcp",
+      "turns:freestun.net:5350",
+    ],
+    username: "free",
+    credential: "free",
+  });
+
+  // Opcionalno: vlastiti TURN iz env
   const turnUrls = String(process.env.TURN_URLS || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const turnUser = process.env.TURN_USERNAME || "openrelayproject";
-  const turnPass = process.env.TURN_CREDENTIAL || "openrelayproject";
+  if (turnUrls.length && process.env.TURN_USERNAME && process.env.TURN_CREDENTIAL) {
+    iceServers.push({
+      urls: turnUrls,
+      username: process.env.TURN_USERNAME,
+      credential: process.env.TURN_CREDENTIAL,
+    });
+  }
 
-  iceServers.push({
-    urls:
-      turnUrls.length > 0
-        ? turnUrls
-        : [
-            "turn:openrelay.metered.ca:80",
-            "turn:openrelay.metered.ca:80?transport=tcp",
-            "turn:openrelay.metered.ca:443",
-            "turns:openrelay.metered.ca:443?transport=tcp",
-          ],
-    username: turnUser,
-    credential: turnPass,
-  });
-
-  res.json({ iceServers });
+  res.setHeader("Cache-Control", "no-store");
+  res.json({ iceServers, ttl });
 });
 
 app.get("/api/availability", (_req, res) => {

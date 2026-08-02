@@ -201,7 +201,6 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen({ port: PORT, host: "0.0.0.0", exclusive: true }, () => {
-  const addr = server.address();
-  console.log(`queenema API listening`, addr);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`queenema API na portu ${PORT}`);
 });

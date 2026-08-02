@@ -4,13 +4,18 @@ import http from "http";
 import { Server } from "socket.io";
 import {
   createRequest,
+  createInvite,
   createTextMessage,
+  createReactionMessage,
+  createCallMessage,
   createVoiceMessage,
-  EMA,
+  reactToMessage,
   endConversation,
   featuresForPatience,
   getConversation,
   getConversationByGuestToken,
+  getEmaProfile,
+  getInvite,
   getLeaderboard,
   getMessages,
   getPublicAvailability,
@@ -22,6 +27,7 @@ import {
   respondToRequest,
   setAcceptNewConversations,
   setPatience,
+  updateEmaProfile,
   wipeConversation,
 } from "./db.js";
 
@@ -85,7 +91,7 @@ function emitConversation(conversationId, event, payload) {
 }
 
 app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, name: "queenema", ema: EMA.name, patience: PATIENCE });
+  res.json({ ok: true, name: "queenema", ema: getEmaProfile().name, patience: PATIENCE });
 });
 
 app.get("/api/availability", (_req, res) => {
@@ -101,12 +107,26 @@ app.post("/api/login", (req, res) => {
   res.json({ user: result.user, ...getStateForEma() });
 });
 
-app.get("/api/ema/state", (_req, res) => {
-  res.json(getStateForEma());
+app.post("/api/ema/profile", (req, res) => {
+  const result = updateEmaProfile({
+    name: req.body?.name,
+    username: req.body?.username,
+    password: req.body?.password,
+    currentPassword: req.body?.currentPassword,
+  });
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json({ user: result.user });
 });
 
-app.get("/api/ema/leaderboard", (_req, res) => {
-  res.json(getLeaderboard());
+app.post("/api/invite", (_req, res) => {
+  const result = createInvite();
+  res.json(result);
+});
+
+app.get("/api/invite/:token", (req, res) => {
+  const result = getInvite(req.params.token);
+  if (!result.ok) return res.status(404).json(result);
+  res.json(result);
 });
 
 app.post("/api/request", (req, res) => {
@@ -116,6 +136,7 @@ app.post("/api/request", (req, res) => {
     avatar: req.body?.avatar,
     avatarMime: req.body?.avatarMime,
     guestToken: req.body?.guestToken,
+    inviteToken: req.body?.inviteToken,
     meta: {
       device: req.body?.device,
       userAgent: req.body?.userAgent || req.headers["user-agent"],
@@ -129,6 +150,14 @@ app.post("/api/request", (req, res) => {
   }
   broadcastEma("new_request", result.request);
   res.json(result);
+});
+
+app.get("/api/ema/state", (_req, res) => {
+  res.json(getStateForEma());
+});
+
+app.get("/api/ema/leaderboard", (_req, res) => {
+  res.json(getLeaderboard());
 });
 
 function guestPayload(token) {
@@ -290,10 +319,12 @@ io.on("connection", (socket) => {
       return;
     }
     if (result.wiped) {
-      io.to(`conv:${result.conversationId}`).emit("conversation_wiped", {
+      const payload = {
         conversationId: result.conversationId,
         guestToken: result.guestToken,
-      });
+      };
+      io.to(`conv:${result.conversationId}`).emit("conversation_wiped", payload);
+      broadcastEma("conversation_wiped", payload);
       broadcastEma("ema_state", getStateForEma());
       return;
     }
@@ -336,6 +367,45 @@ io.on("connection", (socket) => {
     emitConversation(id, "patience", {
       conversation: result.conversation,
     });
+  });
+
+  socket.on("send_reaction", ({ conversationId, kind } = {}) => {
+    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const id = conversationId || socket.data.conversationId;
+    const result = createReactionMessage(id, from, kind);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    emitConversation(id, "new_message", result.message);
+    emitConversation(id, "patience", {
+      conversation: result.conversation,
+    });
+  });
+
+  socket.on("react_message", ({ conversationId, messageId, kind } = {}) => {
+    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const id = conversationId || socket.data.conversationId;
+    const result = reactToMessage(id, from, messageId, kind);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    emitConversation(id, "message_updated", result.message);
+  });
+
+  socket.on("send_call", ({ conversationId, kind } = {}) => {
+    if (socket.data.role !== "ema") {
+      socket.emit("error_message", { error: "Samo Ema može pokrenuti poziv." });
+      return;
+    }
+    const id = conversationId || socket.data.conversationId;
+    const result = createCallMessage(id, "ema", kind);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    emitConversation(id, "new_message", result.message);
   });
 
   socket.on("send_voice", ({ conversationId, audio, mime } = {}) => {

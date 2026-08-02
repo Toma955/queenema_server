@@ -12,35 +12,47 @@ if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 if (!fs.existsSync(mediaDir)) fs.mkdirSync(mediaDir, { recursive: true });
 
 /**
- * Slider 0–100
- * 0  = crno — briše razgovor
- * <40 = limity (broj poruka + znakovi)
- * 40–59 = sredina, bez limity
- * ≥60 = glas
- * ≥75 = poziv + video
- * 100 = poziv na kavu
+ * Slider 0–100 — unlockovi po redoslijedu ikona (honeycomb L→D).
+ * Lijevo od ∞: limiti + like + smile (kumulativno se ne gase).
+ * Desno od ∞: voice → photo → call → video → heart → coffee.
+ * Ispod ∞ (p < 50): desni unlockovi se gase; limiti vrijede.
  */
+const STEP = 100 / 6;
+
 export const PATIENCE = {
   MIN: 0,
   MID: 50,
   MAX: 100,
   WIPE: 0,
-  LIMIT_MAX: 39,
-  FREE_TEXT: 40,
-  VOICE: 60,
-  CALL: 75,
+  /** Zone limitu do ∞ — granice = pozicije soft / mid chipova */
+  HARSH_MAX: Math.round(STEP * 1) - 1, // < soft (~17)
+  SOFT_MAX: Math.round(STEP * 1.5) - 1, // < mid (25)
+  LIMIT_MAX: 49,
+  FREE_TEXT: 50,
+  LIKE: Math.round(STEP * 2), // ~33
+  SMILE: Math.round(STEP * 2.5), // ~42
+  VOICE: Math.round(STEP * 3.5), // ~58
+  PHOTO: Math.round(STEP * 4), // ~67
+  CALL: Math.round(STEP * 4.5), // 75
+  VIDEO: Math.round(STEP * 5), // ~83
+  HEART: Math.round(STEP * 5.5), // ~92
   COFFEE: 100,
 };
 
-export const EMA = {
+export const EMA_DEFAULTS = {
   username: "ema",
   password: "ema",
   name: "Ema",
 };
 
+/** @deprecated use getEmaProfile() — kept for health payload */
+export const EMA = EMA_DEFAULTS;
+
 function defaultStore() {
   return {
     settings: { acceptNewConversations: false },
+    profile: { ...EMA_DEFAULTS },
+    invites: [],
     requests: [],
     conversations: [],
     messages: [],
@@ -60,6 +72,8 @@ function loadStore() {
       ...defaultStore(),
       ...parsed,
       settings: { ...defaultStore().settings, ...(parsed.settings || {}) },
+      profile: { ...EMA_DEFAULTS, ...(parsed.profile || {}) },
+      invites: parsed.invites || [],
       requests: parsed.requests || [],
       conversations: parsed.conversations || [],
       messages: parsed.messages || [],
@@ -94,17 +108,18 @@ function safeEqual(a, b) {
 export function limitsForPatience(patience) {
   const p = Number(patience) || 0;
   if (p <= PATIENCE.WIPE) {
-    return { wipe: true, maxMessages: 0, maxChars: 0 };
+    return { wipe: true, maxMessages: 0, maxChars: 0, daily: 0 };
   }
-  if (p <= PATIENCE.LIMIT_MAX) {
-    const t = p / PATIENCE.FREE_TEXT; // 0..~1
-    return {
-      wipe: false,
-      maxMessages: Math.max(3, Math.round(3 + t * 47)),
-      maxChars: Math.max(24, Math.round(24 + t * 176)),
-    };
+  if (p <= PATIENCE.HARSH_MAX) {
+    return { wipe: false, maxMessages: 1, maxChars: 50, daily: 1 };
   }
-  return { wipe: false, maxMessages: null, maxChars: null };
+  if (p <= PATIENCE.SOFT_MAX) {
+    return { wipe: false, maxMessages: 10, maxChars: 250, daily: 10 };
+  }
+  if (p < PATIENCE.FREE_TEXT) {
+    return { wipe: false, maxMessages: 20, maxChars: 250, daily: 20 };
+  }
+  return { wipe: false, maxMessages: null, maxChars: null, daily: null };
 }
 
 export function featuresForPatience(patience) {
@@ -113,14 +128,59 @@ export function featuresForPatience(patience) {
   return {
     wipe: p <= PATIENCE.WIPE,
     limited: p > PATIENCE.WIPE && p < PATIENCE.FREE_TEXT,
+    smile: p >= PATIENCE.SMILE,
     voice: p >= PATIENCE.VOICE,
+    like: p >= PATIENCE.LIKE,
+    photo: p >= PATIENCE.PHOTO,
     call: p >= PATIENCE.CALL,
-    video: p >= PATIENCE.CALL,
+    video: p >= PATIENCE.VIDEO,
+    heart: p >= PATIENCE.HEART,
     coffee: p >= PATIENCE.COFFEE,
     maxMessages: limits.maxMessages,
     maxChars: limits.maxChars,
+    daily: limits.daily,
   };
 }
+
+/** Gost ne smije slati smile / like / srce dok nije otključano */
+const GUEST_GATES = [
+  {
+    feature: "smile",
+    label: "smajlić",
+    re: /[\u{1F600}-\u{1F60F}\u{1F61C}-\u{1F61D}\u{1F642}\u{1F917}\u{1F92A}\u{1F970}\u{1F972}\u{263A}\u{FE0F}]/u,
+  },
+  {
+    feature: "like",
+    label: "lajk",
+    re: /[\u{1F44D}\u{1F44E}]|\u{1F44D}[\u{1F3FB}-\u{1F3FF}]?/u,
+  },
+  {
+    feature: "heart",
+    label: "srce",
+    re: /[\u{2764}\u{FE0F}]|[\u{1F495}-\u{1F49F}\u{1F9E1}\u{1FA75}-\u{1FA77}\u{2665}]/u,
+  },
+];
+
+export function guestContentBlocked(text, features) {
+  const t = String(text || "");
+  for (const gate of GUEST_GATES) {
+    if (gate.re.test(t) && !features?.[gate.feature]) {
+      return `Nemaš otključan ${gate.label} — Ema mora podići strpljenje.`;
+    }
+  }
+  return null;
+}
+
+const REACTION_KIND = {
+  smile: { feature: "smile", text: "😊", label: "smajlić" },
+  like: { feature: "like", text: "👍", label: "lajk" },
+  heart: { feature: "heart", text: "❤️", label: "srce" },
+};
+
+const CALL_KIND = {
+  call: { feature: "call", text: "📞 Poziv", label: "poziv", type: "call" },
+  video: { feature: "video", text: "📹 Videopoziv", label: "videopoziv", type: "video" },
+};
 
 export function getSettings() {
   return { ...store.settings };
@@ -132,15 +192,53 @@ export function setAcceptNewConversations(value) {
   return getSettings();
 }
 
+export function getEmaProfile() {
+  return {
+    username: store.profile.username,
+    name: store.profile.name,
+  };
+}
+
 export function loginEma(username, password) {
   const u = String(username || "").trim().toLowerCase();
   const p = String(password || "");
-  if (u !== EMA.username || !safeEqual(p, EMA.password)) {
+  const profile = store.profile || EMA_DEFAULTS;
+  if (u !== String(profile.username).toLowerCase() || !safeEqual(p, profile.password)) {
     return { ok: false, error: "Pogrešan username ili password." };
   }
   return {
     ok: true,
-    user: { role: "ema", name: EMA.name, username: EMA.username },
+    user: {
+      role: "ema",
+      name: profile.name,
+      username: profile.username,
+    },
+  };
+}
+
+export function updateEmaProfile({ name, username, password, currentPassword }) {
+  const profile = store.profile || { ...EMA_DEFAULTS };
+  if (!safeEqual(String(currentPassword || ""), profile.password)) {
+    return { ok: false, error: "Trenutna lozinka nije točna." };
+  }
+
+  const nextName = String(name ?? profile.name).trim().slice(0, 40);
+  const nextUser = String(username ?? profile.username).trim().toLowerCase().slice(0, 32);
+  if (!nextName) return { ok: false, error: "Ime je obavezno." };
+  if (!nextUser) return { ok: false, error: "Username je obavezan." };
+
+  profile.name = nextName;
+  profile.username = nextUser;
+  if (password != null && String(password).length) {
+    const nextPass = String(password);
+    if (nextPass.length < 3) return { ok: false, error: "Nova lozinka min. 3 znaka." };
+    profile.password = nextPass;
+  }
+  store.profile = profile;
+  saveStore(store);
+  return {
+    ok: true,
+    user: { role: "ema", name: profile.name, username: profile.username },
   };
 }
 
@@ -196,6 +294,27 @@ export function getPublicAvailability() {
   return { acceptNewConversations: store.settings.acceptNewConversations };
 }
 
+export function createInvite() {
+  const invite = {
+    token: randomUUID(),
+    status: "open",
+    created_at: new Date().toISOString(),
+  };
+  store.invites.push(invite);
+  store.settings.acceptNewConversations = true;
+  saveStore(store);
+  return { ok: true, invite: { token: invite.token, status: invite.status } };
+}
+
+export function getInvite(token) {
+  const invite = store.invites.find((i) => i.token === token) || null;
+  if (!invite) return { ok: false, error: "Link nije valjan." };
+  if (invite.status !== "open") {
+    return { ok: false, error: "Link je već iskorišten ili zatvoren." };
+  }
+  return { ok: true, invite: { token: invite.token, status: invite.status } };
+}
+
 function saveAvatar(avatar, mimeHint = "image/jpeg") {
   if (!avatar || typeof avatar !== "string") return null;
   let mime = mimeHint;
@@ -225,8 +344,15 @@ function saveAvatar(avatar, mimeHint = "image/jpeg") {
   return `/api/media/${filename}`;
 }
 
-export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken }) {
-  if (!store.settings.acceptNewConversations) {
+export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken, inviteToken }) {
+  const inviteKey = String(inviteToken || "").trim();
+  let invite = null;
+  if (inviteKey) {
+    invite = store.invites.find((i) => i.token === inviteKey) || null;
+    if (!invite || invite.status !== "open") {
+      return { ok: false, error: "Link nije valjan ili je već iskorišten." };
+    }
+  } else if (!store.settings.acceptNewConversations) {
     return { ok: false, error: "Ema trenutno ne prima nove razgovore." };
   }
   if (!meta?.cookiesAccepted) {
@@ -299,6 +425,7 @@ export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken 
     guestName,
     guestBio,
     guestAvatar,
+    inviteToken: inviteKey || null,
     meta: {
       device: meta?.device === "mobile" ? "mobile" : "desktop",
       ip,
@@ -311,6 +438,9 @@ export function createRequest({ name, bio, avatar, avatarMime, meta, guestToken 
     created_at: new Date().toISOString(),
   };
   store.requests.push(request);
+  if (invite) {
+    invite.status = "used";
+  }
   saveStore(store);
   return {
     ok: true,
@@ -447,6 +577,8 @@ function mapMessage(m) {
     from: m.from,
     type: m.type,
     text: m.text || "",
+    reaction: m.reaction || null,
+    reactions: Array.isArray(m.reactions) ? m.reactions : [],
     media_url: m.media_path ? `/api/media/${path.basename(m.media_path)}` : null,
     created_at: m.created_at,
   };
@@ -466,6 +598,11 @@ export function createTextMessage(conversationId, from, text) {
   const feats = featuresForPatience(c.patience);
   const trimmed = String(text || "").trim();
   if (!trimmed) return { ok: false, error: "Poruka je prazna." };
+
+  if (from === "guest") {
+    const blocked = guestContentBlocked(trimmed, feats);
+    if (blocked) return { ok: false, error: blocked };
+  }
 
   if (feats.maxChars != null && trimmed.length > feats.maxChars) {
     return {
@@ -503,10 +640,133 @@ export function createTextMessage(conversationId, from, text) {
   };
 }
 
+export function createReactionMessage(conversationId, from, kind) {
+  const c = getConversation(conversationId);
+  if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
+
+  const spec = REACTION_KIND[kind];
+  if (!spec) return { ok: false, error: "Nepoznata reakcija." };
+
+  const feats = featuresForPatience(c.patience);
+  // Ema uvijek smije; gost samo ako je otključano
+  if (from === "guest" && !feats[spec.feature]) {
+    return {
+      ok: false,
+      error: `Nemaš otključan ${spec.label} — Ema mora podići strpljenje.`,
+    };
+  }
+
+  const message = {
+    id: nextId(),
+    conversation_id: c.id,
+    from,
+    type: "reaction",
+    text: spec.text,
+    reaction: kind,
+    reactions: [],
+    media_path: null,
+    created_at: new Date().toISOString(),
+  };
+  store.messages.push(message);
+  saveStore(store);
+
+  return {
+    ok: true,
+    message: { ...mapMessage(message), reaction: kind },
+    conversation: publicConversation(c),
+  };
+}
+
+const REACTABLE = new Set(["text", "voice", "call", "video"]);
+
+/**
+ * Reakcija NA poruku (like / smile / heart).
+ * Ema uvijek; gost po unlocku. Srce od gosta samo na Emine poruke.
+ */
+export function reactToMessage(conversationId, from, messageId, kind) {
+  const c = getConversation(conversationId);
+  if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
+
+  const spec = REACTION_KIND[kind];
+  if (!spec) return { ok: false, error: "Nepoznata reakcija." };
+
+  const feats = featuresForPatience(c.patience);
+  if (from === "guest" && !feats[spec.feature]) {
+    return {
+      ok: false,
+      error: `Nemaš otključan ${spec.label} — Ema mora podići strpljenje.`,
+    };
+  }
+
+  const message = store.messages.find(
+    (m) => m.id === Number(messageId) && m.conversation_id === c.id
+  );
+  if (!message) return { ok: false, error: "Poruka nije pronađena." };
+  if (!REACTABLE.has(message.type)) {
+    return { ok: false, error: "Na ovu poruku se ne može reagirati." };
+  }
+
+  if (from === "guest" && kind === "heart" && message.from !== "ema") {
+    return { ok: false, error: "Srce šalješ Emi — samo na njezine poruke." };
+  }
+
+  if (!Array.isArray(message.reactions)) message.reactions = [];
+
+  const existing = message.reactions.findIndex(
+    (r) => r.from === from && r.kind === kind
+  );
+  if (existing >= 0) {
+    message.reactions.splice(existing, 1);
+  } else {
+    // jedna reakcija istog tipa po osobi; zamijeni drugi kind iste osobe? ne — dozvoli više tipova
+    message.reactions.push({
+      from,
+      kind,
+      text: spec.text,
+      at: new Date().toISOString(),
+    });
+  }
+
+  saveStore(store);
+  return { ok: true, message: mapMessage(message) };
+}
+
+/** Ema šalje poziv / videopoziv; gost samo prima (ako ima unlock vidi akciju) */
+export function createCallMessage(conversationId, from, kind) {
+  const c = getConversation(conversationId);
+  if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
+
+  const spec = CALL_KIND[kind];
+  if (!spec) return { ok: false, error: "Nepoznat tip poziva." };
+
+  if (from !== "ema") {
+    return { ok: false, error: "Samo Ema može pokrenuti poziv." };
+  }
+
+  const message = {
+    id: nextId(),
+    conversation_id: c.id,
+    from,
+    type: spec.type,
+    text: spec.text,
+    reaction: kind,
+    media_path: null,
+    created_at: new Date().toISOString(),
+  };
+  store.messages.push(message);
+  saveStore(store);
+
+  return {
+    ok: true,
+    message: { ...mapMessage(message), reaction: kind },
+    conversation: publicConversation(c),
+  };
+}
+
 export function createVoiceMessage(conversationId, from, base64Audio, mime = "audio/webm") {
   const c = getConversation(conversationId);
   if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
-  if (!featuresForPatience(c.patience).voice) {
+  if (from === "guest" && !featuresForPatience(c.patience).voice) {
     return { ok: false, error: "Glasovne još nisu otključane." };
   }
 

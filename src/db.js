@@ -710,6 +710,18 @@ export function wipeConversation(conversationId) {
   };
 }
 
+export function setGuestNickname(conversationId, nickname) {
+  const c = getConversation(conversationId);
+  if (!c || c.status !== "active") {
+    return { ok: false, error: "Razgovor nije aktivan." };
+  }
+  const next = String(nickname || "").trim().slice(0, 40);
+  if (!next) return { ok: false, error: "Nadimak je prazan." };
+  c.guestName = next;
+  saveStore(store);
+  return { ok: true, conversation: publicConversation(c) };
+}
+
 export function setPatience(conversationId, patience) {
   const c = getConversation(conversationId);
   if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };

@@ -33,9 +33,10 @@ import {
   respondToRequest,
   setAcceptNewConversations,
   setPatience,
+  setGuestNickname,
+  setEmaAvatar,
   updateAdminProfile,
   updateEmaProfile,
-  setEmaAvatar,
   wipeConversation,
 } from "./db.js";
 
@@ -367,6 +368,20 @@ io.on("connection", (socket) => {
   function publicish(c) {
     return publicConversation(c);
   }
+
+  socket.on("set_guest_nickname", ({ conversationId, nickname } = {}) => {
+    if (!isStaff(socket)) return;
+    const result = setGuestNickname(conversationId, nickname);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    emitConversation(conversationId, "conversation_updated", {
+      conversation: result.conversation,
+    });
+    broadcastEma("ema_state", getStateForEma());
+    broadcastAdmin("admin_state", getStateForAdmin());
+  });
 
   socket.on("set_patience", ({ conversationId, patience }) => {
     if (!isStaff(socket)) return;

@@ -209,6 +209,7 @@ export function getEmaProfile() {
   return {
     username: store.profile.username,
     name: store.profile.name,
+    avatar: store.profile.avatar || null,
   };
 }
 
@@ -225,6 +226,7 @@ export function loginEma(username, password) {
       role: "ema",
       name: profile.name,
       username: profile.username,
+      avatar: profile.avatar || null,
     },
   };
 }
@@ -320,8 +322,30 @@ export function updateEmaProfile({ name, username, password, currentPassword }) 
   saveStore(store);
   return {
     ok: true,
-    user: { role: "ema", name: profile.name, username: profile.username },
+    user: {
+      role: "ema",
+      name: profile.name,
+      username: profile.username,
+      avatar: profile.avatar || null,
+    },
   };
+}
+
+/** Ema avatar (chat slika) — dodaj ili makni. */
+export function setEmaAvatar(base64Image, mime = "image/jpeg") {
+  const profile = store.profile || { ...EMA_DEFAULTS };
+  if (!base64Image) {
+    profile.avatar = null;
+    store.profile = profile;
+    saveStore(store);
+    return { ok: true, avatar: null, profile: getEmaProfile() };
+  }
+  const url = saveAvatar(base64Image, mime);
+  if (!url) return { ok: false, error: "Slika nije prihvatljiva." };
+  profile.avatar = url;
+  store.profile = profile;
+  saveStore(store);
+  return { ok: true, avatar: url, profile: getEmaProfile() };
 }
 
 function countMessages(conversationId, from) {
@@ -330,7 +354,7 @@ function countMessages(conversationId, from) {
   ).length;
 }
 
-function publicConversation(c) {
+export function publicConversation(c) {
   const guestSent = countMessages(c.id, "guest");
   const emaSent = countMessages(c.id, "ema");
   return {
@@ -338,6 +362,7 @@ function publicConversation(c) {
     guestName: c.guestName,
     guestBio: c.guestBio || "",
     guestAvatar: c.guestAvatar || null,
+    emaAvatar: store.profile?.avatar || null,
     meta: c.meta || null,
     status: c.status,
     patience: c.patience,

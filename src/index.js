@@ -25,6 +25,7 @@ import {
   getRequestByToken,
   getStateForAdmin,
   getStateForEma,
+  publicConversation,
   loginAdmin,
   loginEma,
   PATIENCE,
@@ -34,6 +35,7 @@ import {
   setPatience,
   updateAdminProfile,
   updateEmaProfile,
+  setEmaAvatar,
   wipeConversation,
 } from "./db.js";
 
@@ -216,19 +218,7 @@ function guestPayload(token) {
   if (conversation?.status === "active") {
     return {
       status: "active",
-      conversation: {
-        id: conversation.id,
-        guestName: conversation.guestName,
-        status: conversation.status,
-        patience: conversation.patience,
-        features: featuresForPatience(conversation.patience),
-        limits: {
-          maxMessages: featuresForPatience(conversation.patience).maxMessages,
-          maxChars: featuresForPatience(conversation.patience).maxChars,
-        },
-        coffeeInvited: Boolean(conversation.coffeeInvited),
-        created_at: conversation.created_at,
-      },
+      conversation: publicConversation(conversation),
       messages: getMessages(conversation.id),
     };
   }
@@ -353,24 +343,8 @@ io.on("connection", (socket) => {
     socket.data.conversationId = c.id;
     socket.join(`conv:${c.id}`);
 
-    const pub = {
-      id: c.id,
-      guestName: c.guestName,
-      guestBio: c.guestBio,
-      guestAvatar: c.guestAvatar,
-      meta: c.meta,
-      status: c.status,
-      patience: c.patience,
-      features: featuresForPatience(c.patience),
-      limits: {
-        maxMessages: featuresForPatience(c.patience).maxMessages,
-        maxChars: featuresForPatience(c.patience).maxChars,
-      },
-      coffeeInvited: Boolean(c.coffeeInvited),
-      created_at: c.created_at,
-    };
     socket.emit("conversation_state", {
-      conversation: pub,
+      conversation: publicConversation(c),
       messages: getMessages(c.id),
     });
   });
@@ -385,30 +359,13 @@ io.on("connection", (socket) => {
     socket.join(`conv:${c.id}`);
     socket.data.conversationId = c.id;
     socket.emit("conversation_state", {
-      conversation: publicish(c),
+      conversation: publicConversation(c),
       messages: getMessages(c.id),
     });
   });
 
   function publicish(c) {
-    return {
-      id: c.id,
-      guestName: c.guestName,
-      guestBio: c.guestBio,
-      guestAvatar: c.guestAvatar,
-      meta: c.meta,
-      status: c.status,
-      patience: c.patience,
-      features: featuresForPatience(c.patience),
-      limits: {
-        maxMessages: featuresForPatience(c.patience).maxMessages,
-        maxChars: featuresForPatience(c.patience).maxChars,
-      },
-      coffeeInvited: Boolean(c.coffeeInvited),
-      created_at: c.created_at,
-      ended_at: c.ended_at,
-      end_reason: c.end_reason,
-    };
+    return publicConversation(c);
   }
 
   socket.on("set_patience", ({ conversationId, patience }) => {
@@ -567,6 +524,49 @@ io.on("connection", (socket) => {
       return;
     }
     emitConversation(id, "message_updated", result.message);
+    if (
+      result.message &&
+      (result.message.type === "call" || result.message.type === "video") &&
+      result.message.status === "accepted"
+    ) {
+      emitConversation(id, "call_session", {
+        conversationId: id,
+        messageId: result.message.id,
+        kind: result.message.type,
+        caller: result.message.from,
+        callee: from,
+      });
+    }
+  });
+
+  socket.on("webrtc_signal", ({ conversationId, ...payload } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") return;
+    const id = conversationId || socket.data.conversationId;
+    if (!id) return;
+    const from = socket.data.role === "guest" ? "guest" : "ema";
+    socket.to(`conv:${id}`).emit("webrtc_signal", {
+      conversationId: id,
+      from,
+      ...payload,
+    });
+  });
+
+  socket.on("set_ema_avatar", ({ image, mime, clear } = {}) => {
+    if (!isStaff(socket)) {
+      socket.emit("error_message", { error: "Nemaš pristup." });
+      return;
+    }
+    const result = clear ? setEmaAvatar(null) : setEmaAvatar(image, mime);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    broadcastEma("ema_avatar", { avatar: result.avatar });
+    broadcastAdmin("ema_avatar", { avatar: result.avatar });
+    // osvježi aktivne chateve s novim emaAvatar
+    for (const c of getStateForEma().conversations || []) {
+      emitConversation(c.id, "patience", { conversation: c });
+    }
   });
 
   socket.on("send_photo", ({ conversationId, image, mime } = {}) => {

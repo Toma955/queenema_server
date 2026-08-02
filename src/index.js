@@ -459,7 +459,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_message", ({ conversationId, text } = {}) => {
-    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = createTextMessage(id, from, text);
     if (!result.ok) {
@@ -473,7 +473,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_reaction", ({ conversationId, kind } = {}) => {
-    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = createReactionMessage(id, from, kind);
     if (!result.ok) {
@@ -487,7 +487,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("react_message", ({ conversationId, messageId, kind } = {}) => {
-    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = reactToMessage(id, from, messageId, kind);
     if (!result.ok) {
@@ -498,7 +498,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_call", ({ conversationId, kind } = {}) => {
-    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const from = socket.data.role === "guest" ? "guest" : "ema";
     if (socket.data.role !== "ema" && socket.data.role !== "guest") {
       socket.emit("error_message", { error: "Nemaš pristup." });
       return;
@@ -513,7 +513,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("send_voice", ({ conversationId, audio, mime } = {}) => {
-    const from = socket.data.role === "ema" ? "ema" : "guest";
+    const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = createVoiceMessage(id, from, audio, mime);
     if (!result.ok) {

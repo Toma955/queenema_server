@@ -16,7 +16,7 @@ import {
   setMode,
 } from "./db.js";
 
-const PORT = process.env.PORT || 3001;
+const PORT = Number(process.env.PORT) || 3001;
 
 const defaultOrigins = [
   "http://localhost:5173",
@@ -201,6 +201,6 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(PORT, "0.0.0.0", () => {
+server.listen(PORT, () => {
   console.log(`queenema API na portu ${PORT}`);
 });

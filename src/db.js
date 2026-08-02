@@ -784,6 +784,8 @@ function mapMessage(m) {
     reactions: Array.isArray(m.reactions) ? m.reactions : [],
     media_url: m.media_path ? `/api/media/${path.basename(m.media_path)}` : null,
     duration_sec: Number.isFinite(m.duration_sec) ? m.duration_sec : null,
+    status: m.status || null,
+    answered_by: m.answered_by || null,
     created_at: m.created_at,
   };
 }
@@ -860,6 +862,31 @@ export function createReactionMessage(conversationId, from, kind) {
     };
   }
 
+  // Kava / dejt = pitanje s Da/Ne, ne obična reakcija
+  if (kind === "coffee") {
+    const message = {
+      id: nextId(),
+      conversation_id: c.id,
+      from,
+      type: "coffee",
+      text: spec.text,
+      reaction: "coffee",
+      reactions: [],
+      status: "pending",
+      answered_by: null,
+      media_path: null,
+      created_at: new Date().toISOString(),
+    };
+    store.messages.push(message);
+    c.coffeeInvited = true;
+    saveStore(store);
+    return {
+      ok: true,
+      message: mapMessage(message),
+      conversation: publicConversation(c),
+    };
+  }
+
   const message = {
     id: nextId(),
     conversation_id: c.id,
@@ -872,7 +899,6 @@ export function createReactionMessage(conversationId, from, kind) {
     created_at: new Date().toISOString(),
   };
   store.messages.push(message);
-  if (kind === "coffee") c.coffeeInvited = true;
   saveStore(store);
 
   return {
@@ -882,7 +908,7 @@ export function createReactionMessage(conversationId, from, kind) {
   };
 }
 
-const REACTABLE = new Set(["text", "voice", "call", "video"]);
+const REACTABLE = new Set(["text", "voice", "photo", "call", "video"]);
 
 /**
  * Reakcija NA poruku (like / smile / heart).
@@ -964,6 +990,8 @@ export function createCallMessage(conversationId, from, kind) {
     text: spec.text,
     reaction: kind,
     media_path: null,
+    status: "pending",
+    answered_by: null,
     created_at: new Date().toISOString(),
   };
   store.messages.push(message);
@@ -974,6 +1002,107 @@ export function createCallMessage(conversationId, from, kind) {
     message: { ...mapMessage(message), reaction: kind },
     conversation: publicConversation(c),
   };
+}
+
+/**
+ * Odgovor na poziv (prihvati/odbij) ili kavu (da/ne).
+ * Samo druga strana; samo dok je pending.
+ */
+export function respondToInvite(conversationId, from, messageId, answer) {
+  const c = getConversation(conversationId);
+  if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
+  if (from !== "ema" && from !== "guest") {
+    return { ok: false, error: "Nepoznata uloga." };
+  }
+
+  const message = store.messages.find(
+    (m) => m.id === Number(messageId) && m.conversation_id === c.id
+  );
+  if (!message) return { ok: false, error: "Poruka nije pronađena." };
+  if (message.from === from) {
+    return { ok: false, error: "Ne možeš odgovoriti na vlastiti poziv." };
+  }
+  if (message.status && message.status !== "pending") {
+    return { ok: false, error: "Već je odgovoreno." };
+  }
+
+  const normalized = String(answer || "").toLowerCase();
+
+  if (message.type === "call" || message.type === "video") {
+    if (normalized !== "accept" && normalized !== "decline") {
+      return { ok: false, error: "Odgovor mora biti prihvati ili odbij." };
+    }
+    message.status = normalized === "accept" ? "accepted" : "declined";
+  } else if (message.type === "coffee") {
+    if (normalized !== "yes" && normalized !== "no") {
+      return { ok: false, error: "Odgovor mora biti da ili ne." };
+    }
+    message.status = normalized === "yes" ? "yes" : "no";
+  } else {
+    return { ok: false, error: "Na ovu poruku se ne odgovara." };
+  }
+
+  message.answered_by = from;
+  message.answered_at = new Date().toISOString();
+  saveStore(store);
+  return { ok: true, message: mapMessage(message) };
+}
+
+export function createPhotoMessage(conversationId, from, base64Image, mime = "image/jpeg") {
+  const c = getConversation(conversationId);
+  if (!c || c.status !== "active") return { ok: false, error: "Razgovor nije aktivan." };
+  if (from === "guest" && !featuresForPatience(c.patience).photo) {
+    return { ok: false, error: "Slike još nisu otključane." };
+  }
+  if (from !== "ema" && from !== "guest") {
+    return { ok: false, error: "Nepoznata uloga." };
+  }
+
+  const raw = String(base64Image || "");
+  const match = raw.match(/^data:(image\/[\w+.-]+);base64,(.+)$/);
+  let mimeStr = String(mime || "image/jpeg");
+  let clean = raw;
+  if (match) {
+    mimeStr = match[1];
+    clean = match[2];
+  } else {
+    const marker = "base64,";
+    const idx = raw.indexOf(marker);
+    clean = idx >= 0 ? raw.slice(idx + marker.length) : raw.replace(/\s/g, "");
+  }
+
+  let buffer;
+  try {
+    buffer = Buffer.from(clean, "base64");
+  } catch {
+    return { ok: false, error: "Slika nije valjana." };
+  }
+  if (buffer.length < 100 || buffer.length > 4_000_000) {
+    return { ok: false, error: "Slika nije prihvatljiva (prevelika ili prazna)." };
+  }
+
+  const ext = mimeStr.includes("png")
+    ? "png"
+    : mimeStr.includes("webp")
+      ? "webp"
+      : mimeStr.includes("gif")
+        ? "gif"
+        : "jpg";
+  const fullPath = path.join(mediaDir, `${randomUUID()}.${ext}`);
+  fs.writeFileSync(fullPath, buffer);
+
+  const message = {
+    id: nextId(),
+    conversation_id: c.id,
+    from,
+    type: "photo",
+    text: "",
+    media_path: fullPath,
+    created_at: new Date().toISOString(),
+  };
+  store.messages.push(message);
+  saveStore(store);
+  return { ok: true, message: mapMessage(message), conversation: publicConversation(c) };
 }
 
 export function createVoiceMessage(

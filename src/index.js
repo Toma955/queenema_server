@@ -10,6 +10,8 @@ import {
   createReactionMessage,
   createCallMessage,
   createVoiceMessage,
+  createPhotoMessage,
+  respondToInvite,
   reactToMessage,
   endConversation,
   featuresForPatience,
@@ -499,6 +501,36 @@ io.on("connection", (socket) => {
     const from = socket.data.role === "guest" ? "guest" : "ema";
     const id = conversationId || socket.data.conversationId;
     const result = createCallMessage(id, from, kind);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    emitConversation(id, "new_message", result.message);
+  });
+
+  socket.on("respond_invite", ({ conversationId, messageId, answer } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") {
+      socket.emit("error_message", { error: "Nemaš pristup." });
+      return;
+    }
+    const from = socket.data.role === "guest" ? "guest" : "ema";
+    const id = conversationId || socket.data.conversationId;
+    const result = respondToInvite(id, from, messageId, answer);
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error });
+      return;
+    }
+    emitConversation(id, "message_updated", result.message);
+  });
+
+  socket.on("send_photo", ({ conversationId, image, mime } = {}) => {
+    if (!isStaff(socket) && socket.data.role !== "guest") {
+      socket.emit("error_message", { error: "Nemaš pristup." });
+      return;
+    }
+    const from = socket.data.role === "guest" ? "guest" : "ema";
+    const id = conversationId || socket.data.conversationId;
+    const result = createPhotoMessage(id, from, image, mime);
     if (!result.ok) {
       socket.emit("error_message", { error: result.error });
       return;

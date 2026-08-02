@@ -12,7 +12,7 @@ services:
       - key: DATA_DIR
         value: /var/data
       - key: ALLOWED_ORIGINS
-        value: https://queenema.art,https://www.queenema.art,https://admin.queenema.art
+        value: https://queenema.art,https://www.queenema.art,https://guest.queenema.art
     disk:
       name: queenema-data
       mountPath: /var/data

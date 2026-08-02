@@ -439,11 +439,33 @@ io.on("connection", (socket) => {
     broadcastAdmin("admin_state", getStateForAdmin());
   });
 
-  socket.on("end_conversation", ({ conversationId }) => {
-    if (!isStaff(socket)) return;
-    const result = endConversation(conversationId, "manual");
-    if (!result.ok) return;
-    emitConversation(conversationId, "conversation_ended", {
+  socket.on("end_conversation", ({ conversationId } = {}) => {
+    const id = conversationId || socket.data.conversationId;
+    if (!id) return;
+
+    if (isStaff(socket)) {
+      const result = endConversation(id, "manual");
+      if (!result.ok) return;
+      emitConversation(id, "conversation_ended", {
+        conversation: result.conversation,
+      });
+      broadcastEma("ema_state", getStateForEma());
+      broadcastAdmin("admin_state", getStateForAdmin());
+      return;
+    }
+
+    if (socket.data.role !== "guest") return;
+    const c = getConversation(id);
+    if (!c || c.guestToken !== socket.data.guestToken) {
+      socket.emit("error_message", { error: "Nemaš pristup." });
+      return;
+    }
+    const result = endConversation(id, "guest_left");
+    if (!result.ok) {
+      socket.emit("error_message", { error: result.error || "Neuspjeh." });
+      return;
+    }
+    emitConversation(id, "conversation_ended", {
       conversation: result.conversation,
     });
     broadcastEma("ema_state", getStateForEma());

@@ -1,4 +1,3 @@
-import Database from "better-sqlite3";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -7,42 +6,10 @@ import { randomUUID } from "crypto";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.DATA_DIR || path.join(__dirname, "..", "data");
 const voiceDir = path.join(dataDir, "voice");
+const storePath = path.join(dataDir, "store.json");
 
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 if (!fs.existsSync(voiceDir)) fs.mkdirSync(voiceDir, { recursive: true });
-
-const db = new Database(path.join(dataDir, "queenema.db"));
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    role TEXT UNIQUE,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    type TEXT NOT NULL DEFAULT 'text',
-    text TEXT NOT NULL DEFAULT '',
-    media_path TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-
-  CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-  );
-`);
-
-const msgCols = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
-if (!msgCols.includes("type")) db.exec("ALTER TABLE messages ADD COLUMN type TEXT NOT NULL DEFAULT 'text'");
-if (!msgCols.includes("media_path")) db.exec("ALTER TABLE messages ADD COLUMN media_path TEXT");
-
-const userCols = db.prepare("PRAGMA table_info(users)").all().map((c) => c.name);
-if (!userCols.includes("role")) db.exec("ALTER TABLE users ADD COLUMN role TEXT");
 
 export const ROLES = {
   toma: { role: "toma", name: "Toma", label: "Admin (desktop)" },
@@ -51,70 +18,72 @@ export const ROLES = {
 
 export const MODES = ["update", "sleep", "chat"];
 
-function ensureFixedUsers() {
-  for (const fixed of Object.values(ROLES)) {
-    const byRole = db.prepare("SELECT id FROM users WHERE role = ?").get(fixed.role);
-    if (byRole) continue;
-    const byName = db
-      .prepare("SELECT id FROM users WHERE name = ? COLLATE NOCASE")
-      .get(fixed.name);
-    if (byName) {
-      db.prepare("UPDATE users SET role = ? WHERE id = ?").run(fixed.role, byName.id);
-    } else {
-      db.prepare("INSERT INTO users (name, role) VALUES (?, ?)").run(fixed.name, fixed.role);
-    }
+function defaultStore() {
+  return {
+    users: [
+      { id: 1, name: "Toma", role: "toma", created_at: new Date().toISOString() },
+      { id: 2, name: "Ema", role: "ema", created_at: new Date().toISOString() },
+    ],
+    messages: [],
+    settings: { mode: "chat" },
+    nextMessageId: 1,
+  };
+}
+
+function loadStore() {
+  if (!fs.existsSync(storePath)) {
+    const store = defaultStore();
+    saveStore(store);
+    return store;
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(storePath, "utf8"));
+    if (!parsed.users?.length) parsed.users = defaultStore().users;
+    if (!parsed.settings) parsed.settings = { mode: "chat" };
+    if (!Array.isArray(parsed.messages)) parsed.messages = [];
+    if (!parsed.nextMessageId) parsed.nextMessageId = 1;
+    return parsed;
+  } catch {
+    const store = defaultStore();
+    saveStore(store);
+    return store;
   }
 }
 
-function ensureSettings() {
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'mode'").get();
-  if (!row) {
-    db.prepare("INSERT INTO settings (key, value) VALUES ('mode', 'chat')").run();
-  }
+function saveStore(store) {
+  fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
 }
 
-ensureFixedUsers();
-ensureSettings();
+let store = loadStore();
 
 export function getMode() {
-  const row = db.prepare("SELECT value FROM settings WHERE key = 'mode'").get();
-  return row?.value || "chat";
+  return store.settings.mode || "chat";
 }
 
 export function setMode(mode) {
-  if (!MODES.includes(mode)) {
-    return { ok: false, error: "Nepoznat mode." };
-  }
-  db.prepare(
-    "INSERT INTO settings (key, value) VALUES ('mode', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
-  ).run(mode);
+  if (!MODES.includes(mode)) return { ok: false, error: "Nepoznat mode." };
+  store.settings.mode = mode;
+  saveStore(store);
   return { ok: true, mode };
 }
 
 export function listUsers() {
-  return db
-    .prepare(
-      `SELECT id, name, role, created_at FROM users
-       WHERE role IN ('toma', 'ema')
-       ORDER BY CASE role WHEN 'toma' THEN 0 ELSE 1 END`
-    )
-    .all();
+  return store.users
+    .filter((u) => u.role === "toma" || u.role === "ema")
+    .sort((a, b) => (a.role === "toma" ? -1 : 1));
 }
 
 export function getUserById(id) {
-  return db.prepare("SELECT id, name, role, created_at FROM users WHERE id = ?").get(id);
+  return store.users.find((u) => u.id === Number(id)) || null;
 }
 
 export function getUserByRole(role) {
-  return db.prepare("SELECT id, name, role, created_at FROM users WHERE role = ?").get(role);
+  return store.users.find((u) => u.role === role) || null;
 }
 
 export function joinAsRole(roleKey) {
   const fixed = ROLES[roleKey];
-  if (!fixed) {
-    return { ok: false, error: "Samo Toma i Ema." };
-  }
-  ensureFixedUsers();
+  if (!fixed) return { ok: false, error: "Samo Toma i Ema." };
   const user = getUserByRole(fixed.role);
   if (!user) return { ok: false, error: "Korisnik nije pronađen." };
   return { ok: true, user };
@@ -135,36 +104,34 @@ function mapMessage(row) {
 }
 
 export function getMessages(limit = 500) {
-  const rows = db
-    .prepare(
-      `
-      SELECT m.id, m.type, m.text, m.media_path, m.created_at,
-             u.id AS user_id, u.name AS user_name, u.role AS user_role
-      FROM messages m
-      JOIN users u ON u.id = m.user_id
-      ORDER BY m.id ASC
-      LIMIT ?
-    `
-    )
-    .all(limit);
-  return rows.map(mapMessage);
+  return store.messages.slice(-limit).map(mapMessage);
 }
 
 export function createTextMessage(userId, text) {
   const trimmed = String(text || "").trim();
   if (!trimmed) return { ok: false, error: "Poruka je prazna." };
   if (trimmed.length > 2000) return { ok: false, error: "Poruka je preduga." };
-  if (!getUserById(userId)) return { ok: false, error: "Korisnik nije pronađen." };
+  const user = getUserById(userId);
+  if (!user) return { ok: false, error: "Korisnik nije pronađen." };
 
-  const result = db
-    .prepare("INSERT INTO messages (user_id, type, text) VALUES (?, 'text', ?)")
-    .run(userId, trimmed);
-
-  return { ok: true, message: getMessageById(result.lastInsertRowid) };
+  const message = {
+    id: store.nextMessageId++,
+    user_id: user.id,
+    user_name: user.name,
+    user_role: user.role,
+    type: "text",
+    text: trimmed,
+    media_path: null,
+    created_at: new Date().toISOString(),
+  };
+  store.messages.push(message);
+  saveStore(store);
+  return { ok: true, message: mapMessage(message) };
 }
 
 export function createVoiceMessage(userId, base64Audio, mime = "audio/webm") {
-  if (!getUserById(userId)) return { ok: false, error: "Korisnik nije pronađen." };
+  const user = getUserById(userId);
+  if (!user) return { ok: false, error: "Korisnik nije pronađen." };
   if (!base64Audio || typeof base64Audio !== "string") {
     return { ok: false, error: "Nema audia." };
   }
@@ -185,28 +152,19 @@ export function createVoiceMessage(userId, base64Audio, mime = "audio/webm") {
   const fullPath = path.join(voiceDir, filename);
   fs.writeFileSync(fullPath, buffer);
 
-  const result = db
-    .prepare(
-      "INSERT INTO messages (user_id, type, text, media_path) VALUES (?, 'voice', '', ?)"
-    )
-    .run(userId, fullPath);
-
-  return { ok: true, message: getMessageById(result.lastInsertRowid) };
-}
-
-function getMessageById(id) {
-  const row = db
-    .prepare(
-      `
-      SELECT m.id, m.type, m.text, m.media_path, m.created_at,
-             u.id AS user_id, u.name AS user_name, u.role AS user_role
-      FROM messages m
-      JOIN users u ON u.id = m.user_id
-      WHERE m.id = ?
-    `
-    )
-    .get(id);
-  return mapMessage(row);
+  const message = {
+    id: store.nextMessageId++,
+    user_id: user.id,
+    user_name: user.name,
+    user_role: user.role,
+    type: "voice",
+    text: "",
+    media_path: fullPath,
+    created_at: new Date().toISOString(),
+  };
+  store.messages.push(message);
+  saveStore(store);
+  return { ok: true, message: mapMessage(message) };
 }
 
 export function resolveVoiceFile(filename) {
@@ -217,13 +175,13 @@ export function resolveVoiceFile(filename) {
 }
 
 export function clearMessages() {
-  const files = db.prepare("SELECT media_path FROM messages WHERE media_path IS NOT NULL").all();
-  for (const f of files) {
+  for (const m of store.messages) {
     try {
-      if (f.media_path && fs.existsSync(f.media_path)) fs.unlinkSync(f.media_path);
+      if (m.media_path && fs.existsSync(m.media_path)) fs.unlinkSync(m.media_path);
     } catch {
       /* ignore */
     }
   }
-  db.prepare("DELETE FROM messages").run();
+  store.messages = [];
+  saveStore(store);
 }

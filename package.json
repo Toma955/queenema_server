@@ -5,12 +5,12 @@
   "type": "module",
   "engines": {
     "node": ">=20"
-  },  "scripts": {
+  },
+  "scripts": {
     "dev": "node src/index.js",
     "start": "node src/index.js"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.2",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "socket.io": "^4.8.1"

@@ -117,6 +117,38 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, name: "queenema", ema: getEmaProfile().name, patience: PATIENCE });
 });
 
+/** ICE/TURN config za WebRTC pozive */
+app.get("/api/ice", (_req, res) => {
+  const iceServers = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun.relay.metered.ca:80" },
+  ];
+
+  const turnUrls = String(process.env.TURN_URLS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const turnUser = process.env.TURN_USERNAME || "openrelayproject";
+  const turnPass = process.env.TURN_CREDENTIAL || "openrelayproject";
+
+  iceServers.push({
+    urls:
+      turnUrls.length > 0
+        ? turnUrls
+        : [
+            "turn:openrelay.metered.ca:80",
+            "turn:openrelay.metered.ca:80?transport=tcp",
+            "turn:openrelay.metered.ca:443",
+            "turns:openrelay.metered.ca:443?transport=tcp",
+          ],
+    username: turnUser,
+    credential: turnPass,
+  });
+
+  res.json({ iceServers });
+});
+
 app.get("/api/availability", (_req, res) => {
   res.json({
     ...getPublicAvailability(),
@@ -321,12 +353,29 @@ io.on("connection", (socket) => {
     io.emit("conversation_started", result.conversation);
   });
 
-  socket.on("join_conversation", ({ conversationId, role, guestToken }) => {
+  socket.on("join_conversation", ({ conversationId, role, guestToken } = {}) => {
     const c = getConversation(conversationId);
     if (!c || c.status !== "active") {
       socket.emit("error_message", { error: "Razgovor nije pronađen." });
       return;
     }
+
+    // Re-join sobe bez mijenjanja uloge (npr. prije WebRTC signala)
+    if (role == null || role === "") {
+      if (socket.data.role === "guest") {
+        if (c.guestToken !== socket.data.guestToken) {
+          socket.emit("error_message", { error: "Nedozvoljen pristup." });
+          return;
+        }
+      } else if (!isStaff(socket)) {
+        socket.emit("error_message", { error: "Nemaš pristup." });
+        return;
+      }
+      socket.data.conversationId = c.id;
+      socket.join(`conv:${c.id}`);
+      return;
+    }
+
     if (role === "guest") {
       if (c.guestToken !== guestToken) {
         socket.emit("error_message", { error: "Nedozvoljen pristup." });
